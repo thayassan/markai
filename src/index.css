@@ -1,0 +1,70 @@
+@import "tailwindcss";
+
+@theme {
+  --font-sans: "DM Sans", ui-sans-serif, system-ui, sans-serif;
+  --font-serif: "Fraunces", serif;
+
+  --color-navy: #0f2a4a;
+  --color-navy-mid: #1a3d6b;
+  --color-navy-light: #254f87;
+  --color-accent: #2ecc9a;
+  --color-accent-dim: #1fa97e;
+  --color-accent-pale: #e6f9f3;
+  --color-gold: #e8a838;
+  --color-gold-pale: #fdf3e0;
+  --color-red: #e85555;
+  --color-red-pale: #fdeaea;
+  --color-text: #0f1923;
+  --color-text-mid: #3a4d60;
+  --color-text-muted: #7a8fa3;
+  --color-border: rgba(15, 42, 74, 0.1);
+  --color-surface: #ffffff;
+  --color-bg: #f7f8fa;
+
+  --radius-card: 16px;
+  --radius-button: 10px;
+}
+
+@layer base {
+  body {
+    @apply bg-bg text-text font-sans;
+  }
+
+  h1, h2, h3, h4, h5, h6 {
+    @apply font-serif;
+  }
+}
+
+@layer components {
+  .card {
+    @apply bg-surface border border-border rounded-card p-7 shadow-sm transition-transform duration-300 hover:-translate-y-1;
+  }
+
+  .btn-primary {
+    @apply bg-navy text-white px-7 py-3.5 rounded-button font-medium transition-opacity hover:opacity-90 disabled:opacity-50;
+  }
+
+  .btn-accent {
+    @apply bg-accent text-navy px-7 py-3.5 rounded-button font-medium transition-opacity hover:opacity-90 disabled:opacity-50;
+  }
+
+  .badge {
+    @apply px-3 py-1 rounded-full text-[11px] font-semibold uppercase tracking-wider;
+  }
+}
+
+/* Custom animations */
+@keyframes float {
+  0% { transform: translateY(0px); }
+  50% { transform: translateY(-10px); }
+  100% { transform: translateY(0px); }
+}
+
+@keyframes marquee {
+  0% { transform: translateX(0); }
+  100% { transform: translateX(-50%); }
+}
+
+.animate-float {
+  animation: float 4s ease-in-out infinite;
+}
