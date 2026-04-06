@@ -1,0 +1,158 @@
+generator client {
+  provider = "prisma-client-js"
+}
+
+datasource db {
+  provider  = "postgresql"
+  url       = env("DATABASE_URL")
+  directUrl = env("DIRECT_URL")
+}
+
+model User {
+  id             String          @id @default(cuid())
+  email          String          @unique
+  fullName       String
+  password       String
+  userType       String
+  studentCode    String?         @unique
+  universityId   String?
+  emailVerified  Boolean         @default(false)
+  avatarUrl      String?
+  phoneNumber    String?
+  location       String?
+  bio            String?
+  twoFactorAuth  Boolean         @default(false)
+  emailAlerts    Boolean         @default(true)
+  verified       Boolean         @default(false)
+  proPlan        Boolean         @default(false)
+  department     String?
+  role           String?
+  createdAt      DateTime        @default(now())
+  university     University?     @relation(fields: [universityId], references: [id])
+  passwordResets PasswordReset[]
+}
+
+model PasswordReset {
+  id        String   @id @default(cuid())
+  email     String
+  otp       String
+  expiresAt DateTime
+  createdAt DateTime @default(now())
+  user      User     @relation(fields: [email], references: [email])
+}
+
+model University {
+  id      String  @id @default(cuid())
+  name    String
+  classes Class[]
+  users   User[]
+
+
+}
+
+model Class {
+  id          String            @id @default(cuid())
+  name        String
+  universityId String
+  lecturerId   String
+  university   University        @relation(fields: [universityId], references: [id])
+  sessions    MarkingSession[]
+  enrollments ClassEnrollment[]
+}
+
+model ClassEnrollment {
+  id        String   @id @default(cuid())
+  classId   String
+  studentId String
+  createdAt DateTime @default(now())
+  class     Class    @relation(fields: [classId], references: [id])
+}
+
+model MarkingSession {
+  id                  String               @id @default(cuid())
+  name                String
+  classId             String?
+  lecturerId          String
+  subject             String
+  sessionType         String
+  examBoard           String
+  courseId            String
+  paperType           String               @default("Theory")
+  questionPdfUrl      String
+  markSchemePdfUrl    String
+  questionTextUrl     String?              
+  markSchemeTextUrl   String?              
+  markingStrictness   String               @default("Standard")
+  feedbackDetail      String               @default("Detailed")
+  status              String               @default("PENDING")
+  createdAt           DateTime             @default(now())
+  class               Class?               @relation(fields: [classId], references: [id])
+  results             StudentResult[]
+  answerSheets        StudentAnswerSheet[]
+}
+
+model StudentAnswerSheet {
+  id            String         @id @default(cuid())
+  sessionId     String
+  studentId     String
+  studentName   String?
+  pdfUrl        String
+  extractedText String
+  extractMethod String
+  status        String         @default("PENDING")
+  errorMessage  String?
+  createdAt     DateTime       @default(now())
+  session       MarkingSession @relation(fields: [sessionId], references: [id])
+
+  @@unique([sessionId, studentId])
+}
+
+model StudentResult {
+  id           String           @id @default(cuid())
+  sessionId    String
+  studentId    String
+  studentName  String?
+  studentCode  String?
+  answerPdfUrl String
+  totalMarks   Int
+  maxMarks     Int
+  percentage   Float
+  grade        String
+  reviewed     Boolean          @default(false)
+  aiData       Json
+  reportPdfUrl String?
+  createdAt    DateTime         @default(now())
+  questions    QuestionResult[]
+  session      MarkingSession   @relation(fields: [sessionId], references: [id])
+
+  @@unique([sessionId, studentId])
+}
+
+model QuestionResult {
+  id                    String        @id @default(cuid())
+  studentResultId       String
+  questionNumber        String
+  questionText          String?
+  topic                 String
+  marksAwarded          Int
+  marksAvailable        Int
+  status                String
+  studentAnswer         String?
+  expectedAnswer        String?
+  aiFeedback            String
+  lostMarksReason       String?
+  improvementSuggestion String
+  lecturerOverride      Int?
+  studentResult         StudentResult @relation(fields: [studentResultId], references: [id])
+}
+
+model Invitation {
+  id          String   @id @default(cuid())
+  email       String   @unique
+  code        String   @unique
+  userType    String   @default("LECTURER") // 'LECTURER' or 'ADMIN'
+  used        Boolean  @default(false)
+  expiresAt   DateTime
+  createdAt   DateTime @default(now())
+  createdBy   String   // admin user id
+}

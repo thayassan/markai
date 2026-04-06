@@ -1,6 +1,28 @@
-node_modules
+# Dependencies
+node_modules/
+
+# Environment files (NEVER commit secrets)
 .env
+.env.local
+.env.production
+*.env
+
+# Database
 prisma/dev.db
 prisma/*.db
-dist
+
+# Build output
+dist/
+
+# Logs
 logs/
+*.log
+dev.log
+
+# OS files
+.DS_Store
+Thumbs.db
+
+# Temp/debug files
+tmp-pupp/
+tmp-pw/

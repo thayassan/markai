@@ -1,0 +1,17 @@
+[build]
+  command = "npm run build"
+  publish = "dist"
+
+# Proxy API requests to Railway Backend
+# Replace YOUR-APP with your actual Railway deployment subdomain
+[[redirects]]
+  from = "/api/*"
+  to = "https://YOUR-APP.up.railway.app/api/:splat"
+  status = 200
+  force = true
+
+# SPA Fallback for React Router
+[[redirects]]
+  from = "/*"
+  to = "/index.html"
+  status = 200
