@@ -671,7 +671,12 @@ async function startServer() {
   // Security middleware
   app.use(helmet());
   app.use(cors({
-    origin: process.env.ALLOWED_ORIGIN || '*',
+    origin: [
+      'https://markaido.netlify.app',
+      'http://localhost:5173',
+      'http://localhost:3000',
+      process.env.ALLOWED_ORIGIN || '*'
+    ],
     credentials: true
   }));
 
@@ -842,6 +847,10 @@ async function startServer() {
       res.status(400).json({ error: error.message });
     }
   });
+
+  // Root Health Checks (for Railway visibility)
+  app.get('/', (req, res) => res.json({ status: 'ok', message: 'MarkAI API is running' }));
+  app.get('/health', (req, res) => res.json({ status: 'healthy', timestamp: new Date().toISOString() }));
 
   // Temporary Debug Route: Confirm DB connectivity/User counts
   app.get('/api/debug/db-status', async (req, res) => {
