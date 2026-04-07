@@ -843,6 +843,20 @@ async function startServer() {
     }
   });
 
+  // Temporary Debug Route: Confirm DB connectivity/User counts
+  app.get('/api/debug/db-status', async (req, res) => {
+    try {
+      const userCount = await (prisma as any).user.count();
+      res.json({ 
+        status: 'connected', 
+        userCount, 
+        databaseUrlHash: process.env.DATABASE_URL?.substring(0, 30) + '...'
+      });
+    } catch (error: any) {
+      res.status(500).json({ status: 'error', message: error.message });
+    }
+  });
+
   app.post('/api/auth/login', authLimiter, async (req, res) => {
     try {
       const { email, password } = loginSchema.parse(req.body);
