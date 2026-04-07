@@ -31,7 +31,7 @@ export const profileUpdateSchema = z.object({
   location: z.string().optional(),
   bio: z.string().optional(),
   department: z.string().optional(),
-  // Removed 'role' to prevent self-escalation
+  role: z.string().optional(),
 });
 
 export const sessionSchema = z.object({
