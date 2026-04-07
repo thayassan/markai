@@ -3,10 +3,9 @@
   publish = "dist"
 
 # Proxy API requests to Railway Backend
-# Replace YOUR-APP with your actual Railway deployment subdomain
 [[redirects]]
   from = "/api/*"
-  to = "markai.railway.internal"
+  to = "https://markai-production.up.railway.app/api/:splat"
   status = 200
   force = true
 
