@@ -6,7 +6,7 @@
 # Replace YOUR-APP with your actual Railway deployment subdomain
 [[redirects]]
   from = "/api/*"
-  to = "https://YOUR-APP.up.railway.app/api/:splat"
+  to = "markai.railway.internal"
   status = 200
   force = true
 
