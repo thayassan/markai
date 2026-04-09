@@ -35,6 +35,9 @@ cleanup_*.ts
 walkthrough.md
 task.md
 metadata.json
+
+# Allow scripts in backend/scripts
+!backend/scripts/*.ts
 code
 codes
 codes-*
