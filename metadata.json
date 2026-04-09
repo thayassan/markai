@@ -1,8 +1,0 @@
-{
-  "name": "MarkAI",
-  "description": "An AI-powered exam paper marking platform that automates grading with expert-level precision using Claude 3.5 Sonnet.",
-  "requestFramePermissions": [
-    "camera",
-    "microphone"
-  ]
-}
