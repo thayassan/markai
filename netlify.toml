@@ -9,7 +9,7 @@
 # Proxy API requests to Railway backend
 [[redirects]]
   from = "/api/*"
-  to = "https://markai-production.up.railway.app/api/:splat"
+  to = "markai-production-b54c.up.railway.app"
   status = 200
   force = true
 
