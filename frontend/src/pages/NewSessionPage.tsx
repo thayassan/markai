@@ -3,7 +3,7 @@ import { DashboardLayout } from '@/src/components/DashboardLayout';
 import { 
   Upload, FileText, Check, ArrowRight, X, Zap, 
   Loader2, Plus, Trash2, LayoutGrid, Users,
-  CheckCircle2, AlertCircle, TrendingUp, Target, Award, Calendar, ChevronRight, ArrowUpRight, BarChart2,
+  CheckCircle2, AlertCircle, AlertTriangle, TrendingUp, Target, Award, Calendar, ChevronRight, ArrowUpRight, BarChart2,
   Sparkles, BookOpen, Hash, Clock, Layers, Globe
 } from 'lucide-react';
 import { motion, AnimatePresence } from 'motion/react';
@@ -59,6 +59,9 @@ const NewSessionPage = () => {
     uploaded: boolean;
     previewOpen: boolean;
     uploadStatus?: string;
+    uploadFailed?: boolean;
+    errorMessage?: string;
+    manualEntryOpen?: boolean;
   }[]>([]);
 
   // Step 4 data
@@ -165,17 +168,30 @@ const NewSessionPage = () => {
   };
 
   const handleStudentFileUpload = async (file: File, index: number) => {
+    const ext = file.name.split('.').pop()?.toLowerCase();
+    const isAllowedExt = ext === 'pdf' || ext === 'jpg' || ext === 'jpeg' || ext === 'png';
     const isValidType = file.type === 'application/pdf' || 
                          file.type === 'image/jpeg' || 
                          file.type === 'image/jpg' || 
-                         file.type === 'image/png';
+                         file.type === 'image/png' ||
+                         isAllowedExt;
     if (!isValidType) {
-       alert('Only PDF, JPG, or PNG files are allowed');
+       setStudentSheets(prev => prev.map((s, i) => i === index ? {
+         ...s,
+         uploading: false,
+         uploadFailed: true,
+         errorMessage: 'Only PDF, JPG, or PNG files are allowed'
+       } : s));
        return;
     }
     if (file.size > 20 * 1024 * 1024) {
-      alert('File size must be under 20MB');
-      return;
+       setStudentSheets(prev => prev.map((s, i) => i === index ? {
+         ...s,
+         uploading: false,
+         uploadFailed: true,
+         errorMessage: 'File size must be under 20MB'
+       } : s));
+       return;
     }
 
     if (uploadLocksRef.current.has(index)) {
@@ -186,7 +202,7 @@ const NewSessionPage = () => {
     
     setStudentSheets(prev =>
       prev.map((s, i) => i === index
-        ? { ...s, uploading: true, uploadFailed: false, uploadStatus: 'Uploading...' }
+        ? { ...s, file, uploading: true, uploadFailed: false, uploadStatus: 'Uploading...' }
         : s
       )
     );
@@ -228,9 +244,31 @@ const NewSessionPage = () => {
         errorMessage: error.message || 'Upload failed',
         showManualEntry: error.allowManualEntry !== false
       } : s));
-      alert(`Upload failed: ${error.message || 'Please try again.'}`);
     } finally {
       uploadLocksRef.current.delete(index);
+    }
+  };
+
+  const updateStudentText = (index: number, text: string) => {
+    setStudentSheets(prev =>
+      prev.map((s, i) =>
+        i === index
+          ? {
+              ...s,
+              extractedText: text,
+              extractMethod: 'manual-entry',
+              uploaded: text.trim().length > 5,
+              uploadFailed: false
+            }
+          : s
+      )
+    );
+  };
+
+  const retryUpload = async (index: number) => {
+    const sheet = studentSheets[index];
+    if (sheet?.file) {
+      await handleStudentFileUpload(sheet.file, index);
     }
   };
 
@@ -855,6 +893,45 @@ const NewSessionPage = () => {
                                 }}
                               />
                             </div>
+                            {s.uploadFailed && (
+                              <div className="mt-2 p-3 bg-amber-50 border border-amber-200 rounded-lg">
+                                <p className="text-xs text-amber-700 mb-2 flex items-start gap-1.5">
+                                  <AlertTriangle size={13} className="shrink-0 mt-0.5" />
+                                  <span>{s.errorMessage || 'Upload failed.'}</span>
+                                </p>
+                                <div className="flex gap-2 mb-2">
+                                  <button
+                                    onClick={() => retryUpload(idx)}
+                                    className="text-xs px-3 py-1.5 bg-navy text-white rounded-md hover:bg-navy/90"
+                                  >
+                                    Retry Upload
+                                  </button>
+                                  <button
+                                    onClick={() =>
+                                      setStudentSheets(prev =>
+                                        prev.map((item, i) => i === idx
+                                          ? { ...item, manualEntryOpen: true }
+                                          : item
+                                        )
+                                      )
+                                    }
+                                    className="text-xs px-3 py-1.5 border border-navy text-navy rounded-md hover:bg-navy/5"
+                                  >
+                                    Type Answer Manually
+                                  </button>
+                                </div>
+
+                                {s.manualEntryOpen && (
+                                  <textarea
+                                    className="w-full p-2 border border-slate-200 rounded-md text-xs font-sans mt-2"
+                                    rows={6}
+                                    placeholder="Type or paste the student's answers here..."
+                                    value={s.extractedText || ''}
+                                    onChange={(e) => updateStudentText(idx, e.target.value)}
+                                  />
+                                )}
+                              </div>
+                            )}
                             {s.previewOpen && (
                               <div className="mt-4 p-4 bg-bg rounded-lg text-[10px] text-text-muted max-h-32 overflow-y-auto font-mono whitespace-pre-wrap border border-border">
                                 {s.extractedText || "No text extracted."}
