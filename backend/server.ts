@@ -272,10 +272,16 @@ class GeminiKeyPool {
 
         } catch (error: any) {
           const errorMsg = error.message || '';
-          const isRateLimit = errorMsg.includes('429') || errorMsg.includes('RESOURCE_EXHAUSTED');
+          const isRateLimit = 
+            errorMsg.includes('429') || 
+            errorMsg.includes('RESOURCE_EXHAUSTED') ||
+            errorMsg.includes('503') ||
+            errorMsg.includes('UNAVAILABLE') ||
+            errorMsg.includes('experiencing high demand') ||
+            errorMsg.includes('temporary');
 
           if (isRateLimit) {
-            logger.warn(`${keyState.label} hit rate limit on [${context}], cooling down and trying next key`);
+            logger.warn(`${keyState.label} hit rate limit/overload on [${context}], cooling down and trying next key`);
             keyState.cooldownUntil = Date.now() + 60000; // 60s cooldown for this specific key
             continue; // loop will pick a different key automatically
           }
@@ -1338,7 +1344,12 @@ Q[number]:
         } catch (error: any) {
           const isDailyQuota = error.isDailyQuota === true;
           const isRateLimit = !isDailyQuota && (
-            error.message?.includes('429') || error.message?.includes('RESOURCE_EXHAUSTED')
+            error.message?.includes('429') || 
+            error.message?.includes('RESOURCE_EXHAUSTED') ||
+            error.message?.includes('503') ||
+            error.message?.includes('UNAVAILABLE') ||
+            error.message?.includes('experiencing high demand') ||
+            error.message?.includes('temporary')
           );
 
           logger.error(`Upload job ${job.id} failed:`, { message: error.message, isDailyQuota, isRateLimit });
