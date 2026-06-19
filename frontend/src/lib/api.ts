@@ -50,3 +50,46 @@ export async function apiFetch(path: string, options: RequestInit = {}) {
     throw error;
   }
 }
+
+export const apiUploadAndPoll = async (
+  path: string,
+  formData: FormData,
+  onProgress?: (status: string) => void
+): Promise<any> => {
+  const startRes = await apiFetch(path, {
+    method: 'POST',
+    body: formData
+  });
+  const startData = await startRes.json();
+
+  if (!startRes.ok) {
+    throw new Error(startData.error || 'Upload failed to start');
+  }
+
+  const { jobId } = startData;
+  onProgress?.('PENDING');
+
+  // Poll every 2 seconds, max 90 seconds total (covers worst case backoff)
+  const maxAttempts = 45;
+  for (let attempt = 0; attempt < maxAttempts; attempt++) {
+    await new Promise(resolve => setTimeout(resolve, 2000));
+
+    const statusRes = await apiFetch(`/api/upload/status/${jobId}`);
+    const statusData = await statusRes.json();
+
+    onProgress?.(statusData.status);
+
+    if (statusData.status === 'COMPLETE') {
+      return statusData;
+    }
+
+    if (statusData.status === 'ERROR') {
+      const err: any = new Error(statusData.error || 'Processing failed');
+      err.allowManualEntry = true;
+      throw err;
+    }
+    // status is PENDING or PROCESSING — keep polling
+  }
+
+  throw new Error('Processing timed out. Please try again or type the answer manually.');
+};

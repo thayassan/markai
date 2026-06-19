@@ -177,3 +177,19 @@ model Invitation {
   createdAt DateTime @default(now())
   createdBy String
 }
+
+model UploadJob {
+  id            String   @id @default(cuid())
+  status        String   @default("PENDING") // PENDING | PROCESSING | COMPLETE | ERROR
+  filename      String
+  extractedText String?
+  method        String?
+  fileUrl       String?
+  textUrl       String?
+  fileType      String?
+  errorMessage  String?
+  createdAt     DateTime @default(now())
+  completedAt   DateTime?
+
+  @@index([status])
+}

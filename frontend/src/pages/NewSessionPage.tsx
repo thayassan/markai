@@ -11,7 +11,7 @@ import { useNavigate, useLocation } from 'react-router-dom';
 import { useQuery } from '@tanstack/react-query';
 import { cn } from '@/src/lib/utils';
 import { safeGetItem } from '../lib/storage';
-import { apiFetch } from '../lib/api';
+import { apiFetch, apiUploadAndPoll } from '../lib/api';
 
 const NewSessionPage = () => {
   const navigate = useNavigate();
@@ -58,6 +58,7 @@ const NewSessionPage = () => {
     uploading: boolean;
     uploaded: boolean;
     previewOpen: boolean;
+    uploadStatus?: string;
   }[]>([]);
 
   // Step 4 data
@@ -76,6 +77,7 @@ const NewSessionPage = () => {
 
   // Errors
   const [errors, setErrors] = useState<Record<string, string>>({});
+  const uploadLocksRef = useRef<Set<number>>(new Set());
 
   // Student sheets initialization
   useEffect(() => {
@@ -163,40 +165,72 @@ const NewSessionPage = () => {
   };
 
   const handleStudentFileUpload = async (file: File, index: number) => {
-    if (file.type !== 'application/pdf') {
-       alert('Only PDF files are allowed');
+    const isValidType = file.type === 'application/pdf' || 
+                         file.type === 'image/jpeg' || 
+                         file.type === 'image/jpg' || 
+                         file.type === 'image/png';
+    if (!isValidType) {
+       alert('Only PDF, JPG, or PNG files are allowed');
        return;
     }
+    if (file.size > 20 * 1024 * 1024) {
+      alert('File size must be under 20MB');
+      return;
+    }
+
+    if (uploadLocksRef.current.has(index)) {
+      console.warn(`Upload already locked for index ${index}, ignoring duplicate trigger`);
+      return;
+    }
+    uploadLocksRef.current.add(index);
     
-    setStudentSheets(prev => prev.map((s, i) => i === index ? { ...s, uploading: true } : s));
+    setStudentSheets(prev =>
+      prev.map((s, i) => i === index
+        ? { ...s, uploading: true, uploadFailed: false, uploadStatus: 'Uploading...' }
+        : s
+      )
+    );
 
     const formData = new FormData();
     formData.append('file', file);
 
     try {
-      const res = await apiFetch('/api/upload/answer-pdf', {
-        method: 'POST',
-        body: formData
-      });
-      const data = await res.json();
+      const result = await apiUploadAndPoll(
+        '/api/upload/answer-pdf',
+        formData,
+        (status) => {
+          const statusLabel =
+            status === 'PENDING' ? 'Queued...' :
+            status === 'PROCESSING' ? 'AI is reading the document...' :
+            'Processing...';
 
-      if (!res.ok) {
-        throw new Error(data.error || 'Upload failed');
-      }
-
+          setStudentSheets(prev =>
+            prev.map((s, i) => i === index ? { ...s, uploadStatus: statusLabel } : s)
+          );
+        }
+      );
 
       setStudentSheets(prev => prev.map((s, i) => i === index ? {
         ...s,
         file: file,
-        fileUrl: data.fileUrl,
-        extractedText: data.text,
-        extractMethod: data.method,
+        fileUrl: result.fileUrl,
+        extractedText: result.text,
+        extractMethod: result.method,
+        fileType: result.fileType,
         uploading: false,
         uploaded: true
       } : s));
     } catch (error: any) {
-      setStudentSheets(prev => prev.map((s, i) => i === index ? { ...s, uploading: false } : s));
+      setStudentSheets(prev => prev.map((s, i) => i === index ? {
+        ...s,
+        uploading: false,
+        uploadFailed: true,
+        errorMessage: error.message || 'Upload failed',
+        showManualEntry: error.allowManualEntry !== false
+      } : s));
       alert(`Upload failed: ${error.message || 'Please try again.'}`);
+    } finally {
+      uploadLocksRef.current.delete(index);
     }
   };
 
@@ -796,24 +830,29 @@ const NewSessionPage = () => {
                                   </div>
                                 </>
                               ) : s.uploading ? (
-                                <div className="flex items-center gap-2">
-                                  <Loader2 size={16} className="animate-spin text-accent" />
-                                  <span className="text-xs text-text-muted">Uploading...</span>
+                                <div className="flex items-center gap-2 text-xs text-slate-500">
+                                  <Loader2 size={14} className="animate-spin text-accent" />
+                                  <span>{s.uploadStatus || 'Processing...'}</span>
                                 </div>
                               ) : (
                                 <button 
                                   onClick={() => document.getElementById(`stu-file-${idx}`)?.click()}
                                   className="text-[10px] font-bold text-accent flex items-center gap-1 hover:underline"
                                 >
-                                  <Upload size={14} /> Upload PDF
+                                  <Upload size={14} /> Upload PDF/Image
                                 </button>
                               )}
                               <input 
                                 id={`stu-file-${idx}`}
                                 type="file"
-                                accept=".pdf"
+                                accept=".pdf,.jpg,.jpeg,.png,application/pdf,image/jpeg,image/png"
                                 className="hidden"
-                                onChange={(e) => e.target.files?.[0] && handleStudentFileUpload(e.target.files[0], idx)}
+                                onChange={(e) => {
+                                  if (e.target.files?.[0]) {
+                                    handleStudentFileUpload(e.target.files[0], idx);
+                                    e.target.value = '';
+                                  }
+                                }}
                               />
                             </div>
                             {s.previewOpen && (
@@ -858,7 +897,7 @@ const NewSessionPage = () => {
                       id="bulk-upload-input"
                       type="file"
                       multiple
-                      accept=".pdf"
+                      accept=".pdf,.jpg,.jpeg,.png,application/pdf,image/jpeg,image/png"
                       className="hidden"
                       onChange={(e) => {
                         const files = Array.from(e.target.files || []);
@@ -884,8 +923,8 @@ const NewSessionPage = () => {
                     <div className="w-20 h-20 bg-bg rounded-2xl flex items-center justify-center mx-auto mb-6 group-hover:bg-accent/10 transition-colors">
                       <LayoutGrid size={40} className="text-text-muted group-hover:text-accent" />
                     </div>
-                    <h3 className="text-lg font-bold text-navy">Drop all student PDFs here</h3>
-                    <p className="text-text-muted mt-2">or click to select multiple files</p>
+                    <h3 className="text-lg font-bold text-navy">Drop all student PDFs or images here</h3>
+                    <p className="text-text-muted mt-2">or click to select multiple files (PDF, JPG, PNG)</p>
                   </div>
 
                   {studentSheets.length > 0 && (

@@ -1176,153 +1176,209 @@ async function startServer() {
 
   app.post('/api/upload/answer-pdf', authMiddleware, upload.single('file'), async (req, res) => {
     try {
-      if (!req.file) return res.status(400).json({ error: 'No file uploaded' });
-
-      let extractedText = '';
-      let method = 'pdf-parse';
-
-      try {
-        const pdfData = await pdf(req.file.buffer);
-        extractedText = pdfData.text?.trim() || '';
-        
-        extractedText = extractedText
-          .replace(/\r\n/g, '\n')
-          .replace(/\r/g, '\n')
-          .replace(/\n{3,}/g, '\n\n')
-          .replace(/(\s)(Q\.?\s*\d+|Question\s*\d+|\d+\s*\.)/g, '\n$2')
-          .trim();
-      } catch (e) {
-        logger.error('pdf-parse failed:', e);
+      if (!req.file) {
+        return res.status(400).json({ error: 'No file uploaded' });
       }
 
-      if (extractedText.length < 50) {
-        method = 'gemini-vision';
-        logger.info(`Handwriting detected for ${req.file.originalname}, queueing Gemini OCR...`);
+      const allowedTypes = ['application/pdf', 'image/jpeg', 'image/jpg', 'image/png'];
+      if (!allowedTypes.includes(req.file.mimetype)) {
+        return res.status(400).json({ error: 'Only PDF, JPG, or PNG files are allowed' });
+      }
 
-        // File size check before sending to Gemini
-        const fileSizeMB = req.file.buffer.length / 1024 / 1024;
-        if (fileSizeMB > 15) {
-          logger.warn(`File too large for inline Gemini Vision: ${fileSizeMB.toFixed(2)}MB`);
-          return res.status(400).json({
-            error: `File is too large (${fileSizeMB.toFixed(1)}MB) for AI processing. Please upload a PDF under 15MB, or scan at a lower resolution.`
-          });
+      // Create a job record immediately and respond
+      const job = await (prisma as any).uploadJob.create({
+        data: {
+          status: 'PENDING',
+          filename: req.file.originalname
         }
+      });
 
-        // Check OCR cache first — prevents duplicate API calls on same file
-        const fileHash = getFileHash(req.file.buffer);
-        const cached = ocrCache.get(fileHash);
+      // Respond IMMEDIATELY
+      res.json({
+        jobId: job.id,
+        status: 'PENDING',
+        message: 'Upload received, processing started'
+      });
 
-        if (cached && Date.now() - cached.timestamp < 3600000) { // 1 hour cache
-          logger.info(`Using cached OCR result for duplicate file upload (hash: ${fileHash.substring(0, 8)}...)`);
-          extractedText = cached.text;
-          method = 'gemini-vision-cached';
-        } else {
-          const base64Pdf = req.file.buffer.toString('base64');
-          logger.info(`PDF base64 size: ${(base64Pdf.length / 1024 / 1024).toFixed(2)} MB`);
+      // Background process (after response)
+      (async () => {
+        try {
+          await (prisma as any).uploadJob.update({
+            where: { id: job.id },
+            data: { status: 'PROCESSING' }
+          });
 
-          try {
-            const response = await callGeminiSafe(
-              [{
-                role: 'user',
-                parts: [
-                  {
-                    inlineData: {
-                      mimeType: 'application/pdf',
-                      data: base64Pdf
-                    }
-                  },
-                  {
-                    text: `This is a handwritten student exam answer sheet. 
-Please carefully extract and transcribe ALL text you can see. 
-Preserve the structure including question numbers, student answers, 
-and any written content. Be as accurate as possible.
+          const isImage = req.file!.mimetype.startsWith('image/');
+          const isPdf = req.file!.mimetype === 'application/pdf';
 
-If you cannot read this document at all, respond with exactly: 
-"UNREADABLE_DOCUMENT"`
-                  }
-                ]
-              }],
-              { context: `OCR-${req.file.originalname}`, maxRetries: 3 }
-            );
+          let extractedText = '';
+          let method = '';
 
-            const resultText = response.text?.trim() || '';
+          if (isPdf) {
+            method = 'pdf-parse';
+            try {
+              const pdfData = await pdf(req.file!.buffer);
+              extractedText = pdfData.text?.trim() || '';
+              extractedText = extractedText
+                .replace(/\r\n/g, '\n')
+                .replace(/\r/g, '\n')
+                .replace(/\n{3,}/g, '\n\n')
+                .replace(/(\s)(Q\.?\s*\d+|Question\s*\d+|\d+\s*\.)/g, '\n$2')
+                .trim();
+            } catch (e) {
+              logger.error('pdf-parse failed:', e);
+            }
+          }
 
-            if (resultText === 'UNREADABLE_DOCUMENT' || resultText.length === 0) {
-              throw new Error('Gemini could not read this handwritten PDF. The scan quality may be too low.');
+          if (isImage || extractedText.length < 50) {
+            method = isImage ? 'gemini-vision-image' : 'gemini-vision';
+            logger.info(`Handwriting detected for job ${job.id} (${req.file!.originalname}), attempting Gemini OCR...`);
+
+            // File size check before sending to Gemini
+            const fileSizeMB = req.file!.buffer.length / 1024 / 1024;
+            if (fileSizeMB > 15) {
+              logger.warn(`File too large for inline Gemini Vision: ${fileSizeMB.toFixed(2)}MB`);
+              await (prisma as any).uploadJob.update({
+                where: { id: job.id },
+                data: {
+                  status: 'ERROR',
+                  errorMessage: `File is too large (${fileSizeMB.toFixed(1)}MB) for AI processing. Please upload a PDF under 15MB.`,
+                  completedAt: new Date()
+                }
+              });
+              return;
             }
 
-            extractedText = resultText;
-            logger.info(`Gemini OCR succeeded for ${req.file.originalname}: ${extractedText.length} chars`);
+            // Check OCR cache first
+            const fileHash = getFileHash(req.file!.buffer);
+            const cached = ocrCache.get(fileHash);
 
-            // Cache the result for future duplicate uploads
-            ocrCache.set(fileHash, { text: extractedText, timestamp: Date.now() });
+            if (cached && Date.now() - cached.timestamp < 3600000) { // 1 hour cache
+              logger.info(`Using cached OCR result for duplicate file upload (hash: ${fileHash.substring(0, 8)}...)`);
+              extractedText = cached.text;
+              method = isImage ? 'gemini-vision-image-cached' : 'gemini-vision-cached';
+            } else {
+              const base64Data = req.file!.buffer.toString('base64');
+              const mimeType = req.file!.mimetype;
 
-          } catch (geminiError: any) {
-            logger.error('═══════════════════════════════════════');
-            logger.error('GEMINI OCR FAILED - FULL ERROR DETAILS:');
-            logger.error('Error message:', geminiError.message);
-            logger.error('Error status:', geminiError.status);
-            logger.error('Error code:', geminiError.code);
-            logger.error('Full error object:', JSON.stringify(geminiError, null, 2));
-            logger.error('═══════════════════════════════════════');
+              const ocrPrompt = `This is a handwritten student exam answer sheet${isImage ? ' (photographed image)' : ''}.
 
-            throw new Error(`OCR failed: ${geminiError.message || 'Unknown error'}`);
+Please transcribe ALL content you can see with these rules:
+1. Preserve question numbers exactly as written (Q1, Q1a, 1., etc.)
+2. Transcribe each student answer completely
+3. If a question is left blank write [NO ANSWER]
+4. If handwriting is unclear write best interpretation with [UNCLEAR] marker
+5. If the image is blurry, dark, or unreadable, respond with exactly: UNREADABLE_DOCUMENT
+
+Format output as:
+Q[number]:
+[student answer here]`;
+
+              try {
+                const response = await callGeminiSafe(
+                  [{
+                    role: 'user',
+                    parts: [
+                      { inlineData: { data: base64Data, mimeType } },
+                      { text: ocrPrompt }
+                    ]
+                  }],
+                  { context: `OCR-${req.file!.originalname}`, maxRetries: 3 }
+                );
+
+                const resultText = response.text?.trim() || '';
+
+                if (resultText === 'UNREADABLE_DOCUMENT' || resultText.length === 0) {
+                  await (prisma as any).uploadJob.update({
+                    where: { id: job.id },
+                    data: {
+                      status: 'ERROR',
+                      errorMessage: 'The image could not be read clearly. Please retake the photo with better lighting, or try uploading as PDF.',
+                      completedAt: new Date()
+                    }
+                  });
+                  return;
+                }
+
+                extractedText = resultText;
+                logger.info(`Gemini OCR succeeded for job ${job.id}: ${extractedText.length} chars`);
+
+                // Cache the result
+                ocrCache.set(fileHash, { text: extractedText, timestamp: Date.now() });
+
+              } catch (geminiError: any) {
+                logger.error(`Gemini OCR failed for job ${job.id}:`, geminiError.message);
+                throw geminiError;
+              }
+            }
           }
+
+          const pdfFilePath = await uploadPdfToSupabase(req.file!.buffer, req.file!.originalname, 'answers');
+          const textFilePath = await uploadTextToSupabase(extractedText, req.file!.originalname, 'texts');
+
+          await (prisma as any).uploadJob.update({
+            where: { id: job.id },
+            data: {
+              status: 'COMPLETE',
+              extractedText,
+              method,
+              fileUrl: pdfFilePath,
+              textUrl: textFilePath,
+              fileType: isImage ? 'image' : 'pdf',
+              completedAt: new Date()
+            }
+          });
+
+          logger.info(`Upload job ${job.id} complete: ${method}`);
+
+        } catch (error: any) {
+          const isRateLimit = error.message?.includes('429') || 
+                               error.message?.includes('RESOURCE_EXHAUSTED') ||
+                               error.message?.includes('quota');
+          logger.error(`Upload job ${job.id} failed:`, error.message);
+
+          await (prisma as any).uploadJob.update({
+            where: { id: job.id },
+            data: {
+              status: 'ERROR',
+              errorMessage: isRateLimit
+                ? 'Gemini AI is currently busy. Please wait a moment, or type the answer manually.'
+                : error.message || 'Upload failed',
+              completedAt: new Date()
+            }
+          });
         }
-      }
+      })();
 
-      const pdfFilePath = await uploadPdfToSupabase(req.file.buffer, req.file.originalname, 'answers');
-      const textFilePath = await uploadTextToSupabase(extractedText, req.file.originalname, 'texts');
-      
-      let warning = undefined;
-      if (extractedText.substring(0, 100).toLowerCase().includes('marking scheme') || extractedText.length < 100) {
-        warning = 'This document looks like a Marking Scheme or is very short. Please verify it is a student answer sheet.';
-        logger.warn(`Suspicious answer sheet uploaded: ${req.file.originalname} - ${warning}`);
-      }
-
-      logger.info(`Uploaded PDF: ${pdfFilePath}, Text: ${textFilePath}, Method: ${method}`);
-
-      res.json({ success: true, text: extractedText, method, filename: req.file.originalname, fileUrl: pdfFilePath, textUrl: textFilePath, warning });
     } catch (error: any) {
-      // STEP 2: Detailed error logging with categorized responses
-      logger.error('Upload route error:', {
-        message: error.message,
-        stack: error.stack,
-        filename: req.file?.originalname
+      logger.error('Upload route error:', error);
+      res.status(500).json({ error: error.message });
+    }
+  });
+
+  app.get('/api/upload/status/:jobId', authMiddleware, async (req, res) => {
+    try {
+      const job = await (prisma as any).uploadJob.findUnique({
+        where: { id: req.params.jobId }
       });
 
-      // Return the ACTUAL error message, not a generic one
-      const isRateLimit = error.message?.includes('429') || 
-                           error.message?.includes('RESOURCE_EXHAUSTED') ||
-                           error.message?.includes('quota');
-
-      const isInvalidModel = error.message?.includes('404') ||
-                              error.message?.includes('not found') ||
-                              error.message?.includes('NOT_FOUND');
-
-      const isAuthError = error.message?.includes('401') ||
-                           error.message?.includes('403') ||
-                           error.message?.includes('API_KEY_INVALID');
-
-      let userMessage = 'Upload failed. Please try again.';
-      
-      if (isRateLimit) {
-        userMessage = 'Gemini API rate limit reached. Please wait a minute before uploading again.';
-      } else if (isInvalidModel) {
-        userMessage = 'AI model configuration error. Please contact support.';
-      } else if (isAuthError) {
-        userMessage = 'AI service authentication failed. Please contact support.';
-      } else {
-        // Show the real error in development for debugging
-        userMessage = process.env.NODE_ENV === 'production'
-          ? 'Upload processing failed. Please try again or contact support.'
-          : `Upload failed: ${error.message}`;
+      if (!job) {
+        return res.status(404).json({ error: 'Job not found' });
       }
 
-      res.status(500).json({ 
-        error: userMessage,
-        debugMessage: process.env.NODE_ENV !== 'production' ? error.message : undefined
+      res.json({
+        jobId: job.id,
+        status: job.status,
+        text: job.extractedText,
+        method: job.method,
+        fileUrl: job.fileUrl,
+        textUrl: job.textUrl,
+        fileType: job.fileType,
+        error: job.errorMessage,
+        allowManualEntry: job.status === 'ERROR'
       });
+    } catch (error: any) {
+      res.status(500).json({ error: error.message });
     }
   });
 
