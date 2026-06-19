@@ -86,6 +86,7 @@ export const apiUploadAndPoll = async (
     if (statusData.status === 'ERROR') {
       const err: any = new Error(statusData.error || 'Processing failed');
       err.allowManualEntry = true;
+      err.retryAfterSeconds = statusData.retryAfterSeconds;
       throw err;
     }
     // status is PENDING or PROCESSING — keep polling

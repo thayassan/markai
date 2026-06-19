@@ -1342,8 +1342,9 @@ Q[number]:
             data: {
               status: 'ERROR',
               errorMessage: isRateLimit
-                ? 'Gemini AI is currently busy. Please wait a moment, or type the answer manually.'
+                ? 'AI is currently busy. Please wait a moment, or type the answer manually.'
                 : error.message || 'Upload failed',
+              retryAfterSeconds: isRateLimit ? 65 : null,
               completedAt: new Date()
             }
           });
@@ -1375,6 +1376,7 @@ Q[number]:
         textUrl: job.textUrl,
         fileType: job.fileType,
         error: job.errorMessage,
+        retryAfterSeconds: job.retryAfterSeconds,
         allowManualEntry: job.status === 'ERROR'
       });
     } catch (error: any) {

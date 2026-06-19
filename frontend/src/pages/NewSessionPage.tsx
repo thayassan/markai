@@ -13,6 +13,105 @@ import { cn } from '@/src/lib/utils';
 import { safeGetItem } from '../lib/storage';
 import { apiFetch, apiUploadAndPoll } from '../lib/api';
 
+const useCountdown = (targetTimestamp: number | null | undefined) => {
+  const [secondsLeft, setSecondsLeft] = useState(0);
+
+  useEffect(() => {
+    if (!targetTimestamp) {
+      setSecondsLeft(0);
+      return;
+    }
+
+    const calculateSeconds = () => {
+      const diff = Math.ceil((targetTimestamp - Date.now()) / 1000);
+      return diff > 0 ? diff : 0;
+    };
+
+    setSecondsLeft(calculateSeconds());
+
+    const timer = setInterval(() => {
+      const left = calculateSeconds();
+      setSecondsLeft(left);
+      if (left <= 0) {
+        clearInterval(timer);
+      }
+    }, 1000);
+
+    return () => clearInterval(timer);
+  }, [targetTimestamp]);
+
+  return secondsLeft;
+};
+
+interface StudentUploadFailureBoxProps {
+  errorMessage?: string;
+  retryAvailableAt?: number | null;
+  manualEntryOpen?: boolean;
+  extractedText?: string;
+  onRetry: () => void;
+  onToggleManualEntry: () => void;
+  onUpdateText: (text: string) => void;
+}
+
+const StudentUploadFailureBox: React.FC<StudentUploadFailureBoxProps> = ({
+  errorMessage,
+  retryAvailableAt,
+  manualEntryOpen,
+  extractedText,
+  onRetry,
+  onToggleManualEntry,
+  onUpdateText
+}) => {
+  const secondsLeft = useCountdown(retryAvailableAt);
+  const isCooldownActive = secondsLeft > 0;
+
+  return (
+    <div className="mt-2 p-3 bg-amber-50 border border-amber-200 rounded-lg">
+      <p className="text-xs text-amber-700 mb-2 flex items-start gap-1.5">
+        <AlertTriangle size={13} className="shrink-0 mt-0.5" />
+        <span>{errorMessage || 'Upload failed.'}</span>
+      </p>
+      <div className="flex gap-2 mb-2">
+        <button
+          onClick={onRetry}
+          disabled={isCooldownActive}
+          className={cn(
+            "text-xs px-3 py-1.5 text-white rounded-md transition-all flex items-center gap-1.5",
+            isCooldownActive 
+              ? "bg-slate-400 cursor-not-allowed opacity-75" 
+              : "bg-navy hover:bg-navy/90"
+          )}
+        >
+          {isCooldownActive ? (
+            <>
+              <Clock size={12} className="animate-spin" />
+              <span>Retry in {secondsLeft}s</span>
+            </>
+          ) : (
+            'Retry Upload'
+          )}
+        </button>
+        <button
+          onClick={onToggleManualEntry}
+          className="text-xs px-3 py-1.5 border border-navy text-navy rounded-md hover:bg-navy/5"
+        >
+          Type Answer Manually
+        </button>
+      </div>
+
+      {manualEntryOpen && (
+        <textarea
+          className="w-full p-2 border border-slate-200 rounded-md text-xs font-sans mt-2"
+          rows={6}
+          placeholder="Type or paste the student's answers here..."
+          value={extractedText || ''}
+          onChange={(e) => onUpdateText(e.target.value)}
+        />
+      )}
+    </div>
+  );
+};
+
 const NewSessionPage = () => {
   const navigate = useNavigate();
   const [currentStep, setCurrentStep] = useState(1);
@@ -62,6 +161,7 @@ const NewSessionPage = () => {
     uploadFailed?: boolean;
     errorMessage?: string;
     manualEntryOpen?: boolean;
+    retryAvailableAt?: number | null;
   }[]>([]);
 
   // Step 4 data
@@ -202,7 +302,7 @@ const NewSessionPage = () => {
     
     setStudentSheets(prev =>
       prev.map((s, i) => i === index
-        ? { ...s, file, uploading: true, uploadFailed: false, uploadStatus: 'Uploading...' }
+        ? { ...s, file, uploading: true, uploadFailed: false, uploadStatus: 'Uploading...', retryAvailableAt: null }
         : s
       )
     );
@@ -237,12 +337,14 @@ const NewSessionPage = () => {
         uploaded: true
       } : s));
     } catch (error: any) {
+      const cooldownSec = error.retryAfterSeconds;
       setStudentSheets(prev => prev.map((s, i) => i === index ? {
         ...s,
         uploading: false,
         uploadFailed: true,
         errorMessage: error.message || 'Upload failed',
-        showManualEntry: error.allowManualEntry !== false
+        showManualEntry: error.allowManualEntry !== false,
+        retryAvailableAt: cooldownSec ? Date.now() + cooldownSec * 1000 : null
       } : s));
     } finally {
       uploadLocksRef.current.delete(index);
@@ -258,7 +360,8 @@ const NewSessionPage = () => {
               extractedText: text,
               extractMethod: 'manual-entry',
               uploaded: text.trim().length > 5,
-              uploadFailed: false
+              uploadFailed: false,
+              retryAvailableAt: null
             }
           : s
       )
@@ -894,43 +997,22 @@ const NewSessionPage = () => {
                               />
                             </div>
                             {s.uploadFailed && (
-                              <div className="mt-2 p-3 bg-amber-50 border border-amber-200 rounded-lg">
-                                <p className="text-xs text-amber-700 mb-2 flex items-start gap-1.5">
-                                  <AlertTriangle size={13} className="shrink-0 mt-0.5" />
-                                  <span>{s.errorMessage || 'Upload failed.'}</span>
-                                </p>
-                                <div className="flex gap-2 mb-2">
-                                  <button
-                                    onClick={() => retryUpload(idx)}
-                                    className="text-xs px-3 py-1.5 bg-navy text-white rounded-md hover:bg-navy/90"
-                                  >
-                                    Retry Upload
-                                  </button>
-                                  <button
-                                    onClick={() =>
-                                      setStudentSheets(prev =>
-                                        prev.map((item, i) => i === idx
-                                          ? { ...item, manualEntryOpen: true }
-                                          : item
-                                        )
-                                      )
-                                    }
-                                    className="text-xs px-3 py-1.5 border border-navy text-navy rounded-md hover:bg-navy/5"
-                                  >
-                                    Type Answer Manually
-                                  </button>
-                                </div>
-
-                                {s.manualEntryOpen && (
-                                  <textarea
-                                    className="w-full p-2 border border-slate-200 rounded-md text-xs font-sans mt-2"
-                                    rows={6}
-                                    placeholder="Type or paste the student's answers here..."
-                                    value={s.extractedText || ''}
-                                    onChange={(e) => updateStudentText(idx, e.target.value)}
-                                  />
-                                )}
-                              </div>
+                              <StudentUploadFailureBox
+                                errorMessage={s.errorMessage}
+                                retryAvailableAt={s.retryAvailableAt}
+                                manualEntryOpen={s.manualEntryOpen}
+                                extractedText={s.extractedText}
+                                onRetry={() => retryUpload(idx)}
+                                onToggleManualEntry={() =>
+                                  setStudentSheets(prev =>
+                                    prev.map((item, i) => i === idx
+                                      ? { ...item, manualEntryOpen: !item.manualEntryOpen }
+                                      : item
+                                    )
+                                  )
+                                }
+                                onUpdateText={(text) => updateStudentText(idx, text)}
+                              />
                             )}
                             {s.previewOpen && (
                               <div className="mt-4 p-4 bg-bg rounded-lg text-[10px] text-text-muted max-h-32 overflow-y-auto font-mono whitespace-pre-wrap border border-border">
