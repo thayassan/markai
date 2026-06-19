@@ -198,6 +198,56 @@ function getGenAI(): GoogleGenAI {
   return getActiveGenAI().client;
 }
 
+// ─── Gemini Retry Wrapper with Exponential Backoff ──────────────────────────
+async function callGeminiWithRetry(
+  contents: any,
+  maxRetries: number = 3
+): Promise<any> {
+  let lastError: any;
+
+  for (let attempt = 1; attempt <= maxRetries; attempt++) {
+    try {
+      const response = await getGenAI().models.generateContent({
+        model: 'gemini-2.0-flash',
+        contents
+      });
+      return response;
+    } catch (error: any) {
+      lastError = error;
+      const isRateLimit = error.message?.includes('429') || 
+                           error.message?.includes('RESOURCE_EXHAUSTED');
+
+      if (isRateLimit && attempt < maxRetries) {
+        const waitMs = Math.pow(2, attempt) * 1000; // 2s, 4s, 8s
+        logger.warn(`Rate limited, retrying in ${waitMs}ms (attempt ${attempt}/${maxRetries})`);
+        await new Promise(resolve => setTimeout(resolve, waitMs));
+        continue;
+      }
+
+      // Not a rate limit, or out of retries — fail immediately
+      throw error;
+    }
+  }
+
+  throw lastError;
+}
+
+// ─── Gemini Model Startup Verification ──────────────────────────────────────
+async function verifyGeminiModel(): Promise<boolean> {
+  try {
+    const testResponse = await getGenAI().models.generateContent({
+      model: 'gemini-2.0-flash',
+      contents: 'Say "OK" if you can read this.'
+    });
+    logger.info(`✅ Gemini model verified: ${testResponse.text}`);
+    return true;
+  } catch (error: any) {
+    logger.error('❌ Gemini model verification FAILED:', error.message);
+    logger.error('This means gemini-2.0-flash may not be available with your API key/region.');
+    return false;
+  }
+}
+
 // ─── Startup Schema Validation ──────────────────────────────────────────────
 async function validateSchema() {
   try {
@@ -1088,48 +1138,63 @@ async function startServer() {
 
       if (extractedText.length < 50) {
         method = 'gemini-vision';
-        logger.info('Handwriting detected, using Gemini OCR');
+        logger.info(`Handwriting detected for ${req.file.originalname}, attempting Gemini OCR...`);
+
+        // STEP 5: File size check before sending to Gemini
+        const fileSizeMB = req.file.buffer.length / 1024 / 1024;
+        if (fileSizeMB > 15) {
+          logger.warn(`File too large for inline Gemini Vision: ${fileSizeMB.toFixed(2)}MB`);
+          return res.status(400).json({
+            error: `File is too large (${fileSizeMB.toFixed(1)}MB) for AI processing. Please upload a PDF under 15MB, or scan at a lower resolution.`
+          });
+        }
+
         const base64Pdf = req.file.buffer.toString('base64');
-        const ocrPrompt = `This is a handwritten student exam answer sheet.
+        logger.info(`PDF base64 size: ${(base64Pdf.length / 1024 / 1024).toFixed(2)} MB`);
 
-Please transcribe ALL content you can see with these rules:
-1. Preserve question numbers exactly as written (Q1, Q1a, 1., etc.)
-2. Transcribe each student answer completely
-3. If a question is left blank write [NO ANSWER]
-4. If handwriting is unclear write best interpretation with [UNCLEAR] marker
-5. Preserve crossed out text as [CROSSED OUT: text]
-6. Maintain structure: question number on its own line, answer below it
-
-Format output exactly as:
-Q[number]:
-[student answer here]`;
+        const ocrPrompt = `This is a handwritten student exam answer sheet PDF. 
+Carefully extract and transcribe ALL text you can see, preserving 
+question numbers and answer structure. If you cannot read this 
+document at all, respond with exactly: "UNREADABLE_DOCUMENT"`;
 
         try {
-          let response;
-          try {
-            response = await getGenAI().models.generateContent({
-              model: 'gemini-2.0-flash',
-              contents: [{ parts: [{ inlineData: { data: base64Pdf, mimeType: 'application/pdf' } }, { text: ocrPrompt }] }]
-            });
-          } catch (e: any) {
-            if (e.status === 429 || e.message?.includes('429')) {
-              logger.info('Gemini rate limit hit, retrying after 2s delay');
-              await new Promise(r => setTimeout(r, 2000));
-              response = await getGenAI().models.generateContent({
-                model: 'gemini-2.0-flash',
-                contents: [{ parts: [{ inlineData: { data: base64Pdf, mimeType: 'application/pdf' } }, { text: ocrPrompt }] }]
-              });
-            } else {
-              throw e;
-            }
+          // STEP 6: Use retry wrapper with exponential backoff
+          const response = await callGeminiWithRetry([{
+            role: 'user',
+            parts: [
+              {
+                inlineData: {
+                  mimeType: 'application/pdf',
+                  data: base64Pdf
+                }
+              },
+              {
+                text: ocrPrompt
+              }
+            ]
+          }]);
+
+          const resultText = response.text?.trim() || '';
+
+          if (resultText === 'UNREADABLE_DOCUMENT' || resultText.length === 0) {
+            throw new Error('Gemini could not read the handwritten PDF. The file may be corrupted, too large, or in an unsupported format.');
           }
-          extractedText = response.text?.trim() || '';
-        } catch (ocrErr: any) {
-          logger.error('Gemini OCR fallback failed:', ocrErr.message);
-          if (ocrErr.status === 429 || ocrErr.message?.includes('429')) {
-             throw new Error('AI rate limits exceeded across all models. Please wait 1 minute before uploading.');
-          }
-          throw new Error('Failed to process PDF with OCR: ' + ocrErr.message);
+
+          extractedText = resultText;
+          logger.info(`Gemini OCR succeeded, extracted ${extractedText.length} characters`);
+
+        } catch (geminiError: any) {
+          // STEP 1: LOG THE FULL ERROR — critical to find the real cause
+          logger.error('═══════════════════════════════════════');
+          logger.error('GEMINI OCR FAILED - FULL ERROR DETAILS:');
+          logger.error('Error message:', geminiError.message);
+          logger.error('Error status:', geminiError.status);
+          logger.error('Error code:', geminiError.code);
+          logger.error('Full error object:', JSON.stringify(geminiError, null, 2));
+          logger.error('═══════════════════════════════════════');
+
+          // Re-throw with the REAL error message instead of a generic one
+          throw new Error(`Gemini OCR failed: ${geminiError.message || 'Unknown error'}`);
         }
       }
 
@@ -1146,8 +1211,45 @@ Q[number]:
 
       res.json({ success: true, text: extractedText, method, filename: req.file.originalname, fileUrl: pdfFilePath, textUrl: textFilePath, warning });
     } catch (error: any) {
-      logger.error('Upload error:', error);
-      res.status(500).json({ error: error.message });
+      // STEP 2: Detailed error logging with categorized responses
+      logger.error('Upload route error:', {
+        message: error.message,
+        stack: error.stack,
+        filename: req.file?.originalname
+      });
+
+      // Return the ACTUAL error message, not a generic one
+      const isRateLimit = error.message?.includes('429') || 
+                           error.message?.includes('RESOURCE_EXHAUSTED') ||
+                           error.message?.includes('quota');
+
+      const isInvalidModel = error.message?.includes('404') ||
+                              error.message?.includes('not found') ||
+                              error.message?.includes('NOT_FOUND');
+
+      const isAuthError = error.message?.includes('401') ||
+                           error.message?.includes('403') ||
+                           error.message?.includes('API_KEY_INVALID');
+
+      let userMessage = 'Upload failed. Please try again.';
+      
+      if (isRateLimit) {
+        userMessage = 'Gemini API rate limit reached. Please wait a minute before uploading again.';
+      } else if (isInvalidModel) {
+        userMessage = 'AI model configuration error. Please contact support.';
+      } else if (isAuthError) {
+        userMessage = 'AI service authentication failed. Please contact support.';
+      } else {
+        // Show the real error in development for debugging
+        userMessage = process.env.NODE_ENV === 'production'
+          ? 'Upload processing failed. Please try again or contact support.'
+          : `Upload failed: ${error.message}`;
+      }
+
+      res.status(500).json({ 
+        error: userMessage,
+        debugMessage: process.env.NODE_ENV !== 'production' ? error.message : undefined
+      });
     }
   });
 
@@ -2263,6 +2365,12 @@ Q[number]:
   });
 
 
+
+  // STEP 3: Verify Gemini model works before accepting uploads
+  const geminiWorks = await verifyGeminiModel();
+  if (!geminiWorks) {
+    logger.warn('⚠️ WARNING: Gemini AI features may not work. Check your GEMINI_API_KEY and model availability.');
+  }
 
   app.listen(PORT, '0.0.0.0', () => logger.info(`✅ Server running on port ${PORT}`));
 }
