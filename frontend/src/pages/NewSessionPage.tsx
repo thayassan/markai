@@ -64,6 +64,7 @@ const StudentUploadFailureBox: React.FC<StudentUploadFailureBoxProps> = ({
 }) => {
   const secondsLeft = useCountdown(retryAvailableAt);
   const isCooldownActive = secondsLeft > 0;
+  const noRetryPossible = retryAvailableAt === null;
 
   return (
     <div className="mt-2 p-3 bg-amber-50 border border-amber-200 rounded-lg">
@@ -72,25 +73,27 @@ const StudentUploadFailureBox: React.FC<StudentUploadFailureBoxProps> = ({
         <span>{errorMessage || 'Upload failed.'}</span>
       </p>
       <div className="flex gap-2 mb-2">
-        <button
-          onClick={onRetry}
-          disabled={isCooldownActive}
-          className={cn(
-            "text-xs px-3 py-1.5 text-white rounded-md transition-all flex items-center gap-1.5",
-            isCooldownActive 
-              ? "bg-slate-400 cursor-not-allowed opacity-75" 
-              : "bg-navy hover:bg-navy/90"
-          )}
-        >
-          {isCooldownActive ? (
-            <>
-              <Clock size={12} className="animate-spin" />
-              <span>Retry in {secondsLeft}s</span>
-            </>
-          ) : (
-            'Retry Upload'
-          )}
-        </button>
+        {!noRetryPossible && (
+          <button
+            onClick={onRetry}
+            disabled={isCooldownActive}
+            className={cn(
+              "text-xs px-3 py-1.5 text-white rounded-md transition-all flex items-center gap-1.5",
+              isCooldownActive 
+                ? "bg-slate-400 cursor-not-allowed opacity-75" 
+                : "bg-navy hover:bg-navy/90"
+            )}
+          >
+            {isCooldownActive ? (
+              <>
+                <Clock size={12} className="animate-spin" />
+                <span>Retry in {secondsLeft}s</span>
+              </>
+            ) : (
+              'Retry Upload'
+            )}
+          </button>
+        )}
         <button
           onClick={onToggleManualEntry}
           className="text-xs px-3 py-1.5 border border-navy text-navy rounded-md hover:bg-navy/5"

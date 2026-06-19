@@ -95,6 +95,9 @@ const logger = winston.createLogger({
   ]
 });
 
+const processId = `${process.pid}-${Math.random().toString(36).substring(7)}`;
+logger.info(`🚀 Server instance starting: ${processId}`);
+
 // D. Service Initialization
 export const resend = new Resend(process.env.RESEND_API_KEY || 're_mock');
 
@@ -288,7 +291,7 @@ async function callGeminiSafe(
 
     for (let attempt = 1; attempt <= maxRetries; attempt++) {
       try {
-        logger.info(`Gemini call [${context}] attempt ${attempt}/${maxRetries}`);
+        logger.info(`Gemini call [${context}] handled by instance ${processId}, attempt ${attempt}/${maxRetries}`);
         trackGeminiCall();
 
         const response = await getGenAI().models.generateContent({
@@ -302,26 +305,44 @@ async function callGeminiSafe(
         lastError = error;
 
         const errorMsg = error.message || '';
-        const isRateLimit = 
-          errorMsg.includes('429') || 
-          errorMsg.includes('RESOURCE_EXHAUSTED') ||
-          errorMsg.includes('quota');
+        const errorBody = error.response?.data || error.errorDetails || '';
+
+        // Try to detect WHICH quota was hit from the error details
+        const fullErrorText = `${errorMsg} ${JSON.stringify(errorBody)}`.toLowerCase();
+
+        const isDailyQuota = fullErrorText.includes('per day') ||
+                              fullErrorText.includes('requestsperday') ||
+                              fullErrorText.includes('rpd');
+
+        const isPerMinuteQuota = fullErrorText.includes('per minute') ||
+                                  fullErrorText.includes('requestsperminute') ||
+                                  fullErrorText.includes('rpm') ||
+                                  (!isDailyQuota && (errorMsg.includes('429') || errorMsg.includes('RESOURCE_EXHAUSTED')));
 
         logger.error(`Gemini call [${context}] failed:`, {
           attempt,
           message: errorMsg,
-          isRateLimit
+          isDailyQuota,
+          isPerMinuteQuota,
+          fullErrorText: fullErrorText.substring(0, 500)
         });
 
-        if (isRateLimit && attempt < maxRetries) {
-          // Exponential backoff: 5s, 15s, 30s
-          const waitMs = attempt === 1 ? 5000 : attempt === 2 ? 15000 : 30000;
-          logger.warn(`Rate limited [${context}], waiting ${waitMs}ms before retry ${attempt + 1}`);
+        if (isDailyQuota) {
+          // Don't retry at all — this won't clear for hours
+          const dailyError: any = new Error(
+            'Daily AI quota has been used up for today. This resets at midnight Pacific Time. Please type answers manually until then.'
+          );
+          dailyError.isDailyQuota = true;
+          throw dailyError;
+        }
+
+        if (isPerMinuteQuota && attempt < maxRetries) {
+          const waitMs = attempt === 1 ? 15000 : attempt === 2 ? 30000 : 60000;
+          logger.warn(`Per-minute rate limited [${context}], waiting ${waitMs / 1000}s before retry`);
           await new Promise(resolve => setTimeout(resolve, waitMs));
           continue;
         }
 
-        // Not a rate limit OR out of retries
         throw lastError;
       }
     }
@@ -1332,19 +1353,23 @@ Q[number]:
           logger.info(`Upload job ${job.id} complete: ${method}`);
 
         } catch (error: any) {
-          const isRateLimit = error.message?.includes('429') || 
-                               error.message?.includes('RESOURCE_EXHAUSTED') ||
-                               error.message?.includes('quota');
-          logger.error(`Upload job ${job.id} failed:`, error.message);
+          const isDailyQuota = error.isDailyQuota === true;
+          const isRateLimit = !isDailyQuota && (
+            error.message?.includes('429') || error.message?.includes('RESOURCE_EXHAUSTED')
+          );
+
+          logger.error(`Upload job ${job.id} failed:`, { message: error.message, isDailyQuota, isRateLimit });
 
           await (prisma as any).uploadJob.update({
             where: { id: job.id },
             data: {
               status: 'ERROR',
-              errorMessage: isRateLimit
-                ? 'AI is currently busy. Please wait a moment, or type the answer manually.'
-                : error.message || 'Upload failed',
-              retryAfterSeconds: isRateLimit ? 65 : null,
+              errorMessage: isDailyQuota
+                ? 'Daily AI quota reached. This resets at midnight Pacific Time — please type answers manually for now.'
+                : isRateLimit
+                ? 'AI is currently busy. Please wait before retrying, or type the answer manually.'
+                : error.message,
+              retryAfterSeconds: isDailyQuota ? null : (isRateLimit ? 65 : null), // null = no retry timer, manual only
               completedAt: new Date()
             }
           });
