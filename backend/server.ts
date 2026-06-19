@@ -931,13 +931,8 @@ async function startServer() {
       }
 
       const token = jwt.sign(
-        { 
-          id: user.id, 
-          email: user.email, 
-          role: (user.role || user.userType || 'STUDENT').toUpperCase(), 
-          userType: (user.userType || user.role || 'STUDENT').toUpperCase()
-        }, 
-        process.env.JWT_SECRET!, 
+        { id: user.id, email: user.email, userType: user.userType },
+        process.env.JWT_SECRET!,
         { expiresIn: '7d' }
       );
       
@@ -995,13 +990,8 @@ async function startServer() {
       if (!isValid) return res.status(401).json({ error: 'Invalid credentials' });
 
       const token = jwt.sign(
-        { 
-          id: user.id, 
-          email: user.email, 
-          role: (user.role || user.userType || 'STUDENT').toUpperCase(), 
-          userType: (user.userType || user.role || 'STUDENT').toUpperCase()
-        }, 
-        process.env.JWT_SECRET!, 
+        { id: user.id, email: user.email, userType: user.userType },
+        process.env.JWT_SECRET!,
         { expiresIn: '7d' }
       );
       res.json({ 
@@ -2307,10 +2297,10 @@ If you cannot read this document at all, respond with exactly:
 
   app.get('/api/student/results', authMiddleware, async (req, res) => {
     try {
-      if (req.user.role === 'STUDENT') {
+      if (req.user.userType === 'STUDENT') {
         const results = await (prisma as any).studentResult.findMany({ where: { studentId: req.user.studentCode }, include: { session: true, questions: true }, orderBy: { createdAt: 'desc' } });
         res.json(results);
-      } else if (req.user.role === 'LECTURER') {
+      } else if (req.user.userType === 'LECTURER') {
         const results = await (prisma as any).studentResult.findMany({ where: { session: { lecturerId: req.user.id } }, include: { session: true, questions: true }, orderBy: { createdAt: 'desc' } });
         res.json(results);
       } else {
@@ -2325,10 +2315,9 @@ If you cannot read this document at all, respond with exactly:
 
   app.get('/api/dashboard/stats', authMiddleware, async (req, res) => {
     try {
-      const userRole = (req.user.role || '').toUpperCase();
       const userType = (req.user.userType || '').toUpperCase();
 
-      if (userRole === 'LECTURER' || userType === 'LECTURER') {
+      if (userType === 'LECTURER') {
         // Optimization: Run these sequentially but check for timeouts
         // results.length is papersMarked, so we can save one count query
         const results = await (prisma as any).studentResult.findMany({ 
@@ -2343,7 +2332,7 @@ If you cannot read this document at all, respond with exactly:
         const avgClassScore = papersMarked ? results.reduce((acc: number, r: any) => acc + r.percentage, 0) / papersMarked : 0;
         
         res.json({ totalSessions, papersMarked, pendingReview, avgClassScore });
-      } else if (req.user.role === 'STUDENT') {
+      } else if (userType === 'STUDENT') {
         const results = await (prisma as any).studentResult.findMany({ 
           where: { studentId: req.user.studentCode || '' }, 
           select: { percentage: true, grade: true, createdAt: true } 
@@ -2357,7 +2346,7 @@ If you cannot read this document at all, respond with exactly:
       } else {
         // Admin stats - simplified
         const totalSessions = await (prisma as any).markingSession.count();
-        const totalStudents = await (prisma as any).user.count({ where: { role: 'STUDENT' } });
+        const totalStudents = await (prisma as any).user.count({ where: { userType: 'STUDENT' } });
         const totalResults = await (prisma as any).studentResult.count();
         res.json({ totalSessions, totalStudents, totalResults });
       }

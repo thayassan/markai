@@ -58,16 +58,24 @@ async function main() {
   }
 
   // Add a sample class
-  const sampleClass = await prisma.class.upsert({
-    where: { id: 'sample-class' },
-    update: {},
-    create: {
-      id: 'sample-class',
-      name: 'Biology 101',
-      universityId: university.id,
-      lecturerId: 'lecturer_id', // This will be updated if needed
-    },
+  const lecturerUser = await prisma.user.findFirst({
+    where: { email: 'lecturer@markai.demo' }
   });
+
+  if (lecturerUser) {
+    const sampleClass = await prisma.class.upsert({
+      where: { id: 'sample-class' },
+      update: {
+        lecturerId: lecturerUser.id,
+      },
+      create: {
+        id: 'sample-class',
+        name: 'Biology 101',
+        universityId: university.id,
+        lecturerId: lecturerUser.id,
+      },
+    });
+  }
 
   console.log('Seed data created successfully!');
 }

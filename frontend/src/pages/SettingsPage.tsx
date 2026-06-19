@@ -394,7 +394,7 @@ const SettingsPage = () => {
                 <div className="space-y-4">
                   <div className="flex justify-between items-center text-sm">
                     <span className="text-text-mid">
-                      {user?.role === 'LECTURER' ? 'Papers marked this month' : 'Storage used'}
+                      {user?.userType === 'LECTURER' ? 'Papers marked this month' : 'Storage used'}
                     </span>
                     <span className="font-bold text-navy">
                       {user?.userType === 'LECTURER' ? '842 / 2,000' : '1.2 GB / 5 GB'}
