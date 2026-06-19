@@ -245,16 +245,10 @@ const NewSessionPage = () => {
     formData.append('file', file);
 
     try {
-      const res = await apiFetch('/api/upload/answer-pdf', {
-        method: 'POST',
-        body: formData
-      });
-      const data = await res.json();
-
-      if (!res.ok) {
-        throw new Error(data.error || 'Upload failed');
-      }
-
+      const data = await apiUploadAndPoll(
+        '/api/upload/answer-pdf',
+        formData
+      );
 
       setter((prev: any) => ({
         ...prev,
