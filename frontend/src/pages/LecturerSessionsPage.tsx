@@ -19,6 +19,7 @@ const LecturerSessionsPage = () => {
   const [searchQuery, setSearchQuery] = useState('');
   const [selectedSessionId, setSelectedSessionId] = useState<string | null>(null);
   const [statusFilter, setStatusFilter] = useState('ALL');
+  const [deleteTarget, setDeleteTarget] = useState<{ id: string; name: string } | null>(null);
   const [showCalendar, setShowCalendar] = useState(false);
   const [dateRange, setDateRange] = useState<[Date | null, Date | null]>([null, null]);
   const [startDate, endDate] = dateRange;
@@ -47,9 +48,7 @@ const LecturerSessionsPage = () => {
 
   const handleDelete = (e: React.MouseEvent, id: string, name: string) => {
     e.stopPropagation();
-    if (window.confirm(`Are you sure you want to delete "${name}"? This will permanently delete all student results, submissions and marking data.`)) {
-      deleteMutation.mutate(id);
-    }
+    setDeleteTarget({ id, name });
   };
 
   // Queries
@@ -328,6 +327,71 @@ const LecturerSessionsPage = () => {
                 </div>
               </div>
             </motion.div>
+          )}
+        </AnimatePresence>
+
+        <AnimatePresence>
+          {deleteTarget && (
+            <div className="fixed inset-0 z-50 flex items-center justify-center">
+              {/* Backdrop */}
+              <motion.div 
+                initial={{ opacity: 0 }}
+                animate={{ opacity: 1 }}
+                exit={{ opacity: 0 }}
+                onClick={() => setDeleteTarget(null)}
+                className="absolute inset-0 bg-navy/40 backdrop-blur-sm"
+              />
+              
+              {/* Modal Card */}
+              <motion.div 
+                initial={{ scale: 0.95, opacity: 0, y: 10 }}
+                animate={{ scale: 1, opacity: 1, y: 0 }}
+                exit={{ scale: 0.95, opacity: 0, y: 10 }}
+                className="relative w-full max-w-md bg-white rounded-2xl p-6 shadow-2xl border border-border z-10 mx-4"
+              >
+                <button 
+                  onClick={() => setDeleteTarget(null)}
+                  className="absolute top-4 right-4 p-2 text-text-muted hover:text-navy hover:bg-slate-100 rounded-lg transition-all"
+                >
+                  <X size={18} />
+                </button>
+
+                <div className="flex gap-4">
+                  <div className="w-10 h-10 rounded-full bg-red-50 flex items-center justify-center text-red-500 shrink-0">
+                    <AlertCircle size={20} />
+                  </div>
+                  <div className="space-y-2">
+                    <h3 className="text-lg font-bold text-navy">Delete Marking Session</h3>
+                    <p className="text-sm text-text-muted leading-relaxed">
+                      Are you sure you want to delete <span className="font-semibold text-navy">"{deleteTarget.name}"</span>? This will permanently delete all student results, submissions, and marking data. This action cannot be undone.
+                    </p>
+                  </div>
+                </div>
+
+                <div className="flex justify-end gap-3 mt-6 pt-4 border-t border-border">
+                  <button
+                    onClick={() => setDeleteTarget(null)}
+                    className="px-4 py-2 text-xs font-semibold text-text-muted hover:text-navy hover:bg-slate-100 rounded-lg transition-all"
+                  >
+                    Cancel
+                  </button>
+                  <button
+                    onClick={() => {
+                      deleteMutation.mutate(deleteTarget.id);
+                      setDeleteTarget(null);
+                    }}
+                    className="px-4 py-2 text-xs font-semibold bg-red-500 hover:bg-red-600 text-white rounded-lg transition-all flex items-center gap-1.5"
+                  >
+                    {deleteMutation.status === 'pending' && deleteMutation.variables === deleteTarget.id ? (
+                      <Loader2 size={12} className="animate-spin" />
+                    ) : (
+                      <Trash2 size={12} />
+                    )}
+                    Delete Session
+                  </button>
+                </div>
+              </motion.div>
+            </div>
           )}
         </AnimatePresence>
       </div>
