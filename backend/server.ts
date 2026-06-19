@@ -22,6 +22,7 @@ import pLimit from 'p-limit';
 import { z } from 'zod';
 import winston from 'winston';
 import fs from 'fs';
+import crypto from 'crypto';
 import {
   supabase,
   uploadPdfToSupabase,
@@ -202,19 +203,19 @@ function getGenAI(): GoogleGenAI {
 // GEMINI REQUEST QUEUE
 // Ensures we never fire more than N requests per minute
 // Prevents rate limit errors from parallel/rapid calls
+// Free tier: 10 RPM for gemini-2.0-flash
 // ─────────────────────────────────────────────────
 class GeminiQueue {
   private queue: Array<() => Promise<void>> = [];
   private processing = false;
   private requestTimestamps: number[] = [];
-  private readonly maxRequestsPerMinute = 12; // stay under 15 RPM free tier limit
+  private readonly maxRequestsPerMinute = 8; // stay safely under the 10 RPM ceiling
 
   async enqueue<T>(task: () => Promise<T>): Promise<T> {
     return new Promise((resolve, reject) => {
       this.queue.push(async () => {
         try {
-          const result = await task();
-          resolve(result);
+          resolve(await task());
         } catch (error) {
           reject(error);
         }
@@ -228,17 +229,12 @@ class GeminiQueue {
     this.processing = true;
 
     while (this.queue.length > 0) {
-      // Clean timestamps older than 60 seconds
       const now = Date.now();
-      this.requestTimestamps = this.requestTimestamps.filter(
-        t => now - t < 60000
-      );
+      this.requestTimestamps = this.requestTimestamps.filter(t => now - t < 60000);
 
-      // Wait if we're at the rate limit
       if (this.requestTimestamps.length >= this.maxRequestsPerMinute) {
-        const oldestTimestamp = this.requestTimestamps[0];
-        const waitTime = 60000 - (now - oldestTimestamp) + 500; // +500ms buffer
-        logger.info(`Gemini queue: throttling, waiting ${waitTime}ms`);
+        const waitTime = 60000 - (now - this.requestTimestamps[0]) + 2000;
+        logger.info(`Gemini queue: throttling, waiting ${Math.round(waitTime / 1000)}s`);
         await new Promise(resolve => setTimeout(resolve, waitTime));
         continue;
       }
@@ -247,11 +243,9 @@ class GeminiQueue {
       if (task) {
         this.requestTimestamps.push(Date.now());
         await task();
-        // Small delay between requests to be safe
-        await new Promise(resolve => setTimeout(resolve, 1500));
+        await new Promise(resolve => setTimeout(resolve, 3000)); // 3s gap, free tier safe
       }
     }
-
     this.processing = false;
   }
 
@@ -261,6 +255,26 @@ class GeminiQueue {
 }
 
 const geminiQueue = new GeminiQueue();
+
+// ─── Daily Call Tracker ─────────────────────────────────────────────────────
+let dailyCallCount = 0;
+let dailyResetTime = new Date().setHours(24, 0, 0, 0);
+
+function trackGeminiCall() {
+  if (Date.now() > dailyResetTime) {
+    dailyCallCount = 0;
+    dailyResetTime = new Date().setHours(24, 0, 0, 0);
+  }
+  dailyCallCount++;
+  logger.info(`Gemini calls today: ${dailyCallCount} / ~1500 free tier limit`);
+}
+
+// ─── OCR Result Cache (prevents duplicate API calls on same file) ───────────
+const ocrCache = new Map<string, { text: string; timestamp: number }>();
+
+function getFileHash(buffer: Buffer): string {
+  return crypto.createHash('md5').update(buffer).digest('hex');
+}
 
 // ─── Queue + Retry wrapper for ALL Gemini calls ─────────────────────────────
 async function callGeminiSafe(
@@ -275,6 +289,7 @@ async function callGeminiSafe(
     for (let attempt = 1; attempt <= maxRetries; attempt++) {
       try {
         logger.info(`Gemini call [${context}] attempt ${attempt}/${maxRetries}`);
+        trackGeminiCall();
 
         const response = await getGenAI().models.generateContent({
           model: 'gemini-2.0-flash',
@@ -439,41 +454,46 @@ const validateMarkingResult = (result: any) => {
   return result;
 };
 
-async function parseQuestionPaper(
-  questionPdfText: string
-): Promise<any[]> {
+// ─── Combined Question Paper + Mark Scheme Parser (saves 1 API call per session) ───
+async function parseQuestionPaperAndMarkScheme(
+  questionPdfText: string,
+  markSchemeText: string
+): Promise<{ questions: any[]; markScheme: any[] }> {
 
-  logger.info('Gemini: Parsing question paper...');
+  logger.info('Parsing question paper AND mark scheme in ONE call...');
 
   const prompt = `
-You are an expert exam paper analyser.
-
-Read this entire question paper carefully and extract every question
-including all sub-questions.
+You are an expert exam analyser. Read both documents below and extract structured data from each.
 
 QUESTION PAPER:
 ${questionPdfText}
 
-Instructions:
-- Identify every question and sub-question in the paper
-- Understand exactly what each question is asking the student
-- Extract the marks available for each question
-- Identify the topic or concept each question is testing
-- Include questions numbered like 1, 1a, 1(b), Q1, Q1a etc
+MARK SCHEME:
+${markSchemeText}
 
-Return ONLY a valid JSON array.
-No markdown. No backticks. No explanation. Just the JSON array.
-
-Format:
-[
-  {
-    "questionNumber": "1a",
-    "questionText": "Write the full question text exactly as it appears",
-    "marksAvailable": 2,
-    "topic": "topic this question tests",
-    "questionType": "short answer or calculation or definition or essay or diagram"
-  }
-]
+Return ONLY a valid JSON object with no markdown, no backticks, no extra text:
+{
+  "questions": [
+    {
+      "questionNumber": "1a",
+      "questionText": "Write the full question text exactly as it appears",
+      "marksAvailable": 2,
+      "topic": "topic this question tests",
+      "questionType": "short answer or calculation or definition or essay or diagram"
+    }
+  ],
+  "markScheme": [
+    {
+      "questionNumber": "1a",
+      "marksAvailable": 2,
+      "requiredKeywords": ["must appear for full marks"],
+      "acceptAlternatives": ["other valid phrasings"],
+      "rejectList": ["wrong answers that look correct"],
+      "methodMarks": "marks for correct approach even if answer wrong",
+      "markingGuidance": "additional marking notes"
+    }
+  ]
+}
 
 Rules:
 1. questionNumber must match exactly what is printed in the paper
@@ -481,69 +501,25 @@ Rules:
 3. Extract marks from patterns like [2] or (3 marks) or /4
 4. If marks not visible set marksAvailable to null
 5. Every question including sub-questions must be included
-6. Do not skip any question no matter how short`;
+6. Do not skip any question no matter how short
+7. questionNumber must match between questions and markScheme arrays
+8. Include every mark scheme entry`;
 
   try {
     const response = await groqWithRetry(prompt);
 
-    const text = extractJSON(response.text || '[]', 'array');
+    const text = extractJSON(response.text || '{}', 'object');
     const parsed = JSON.parse(text);
 
-    logger.info(`Gemini parsed ${parsed.length} questions from paper`);
-    return parsed;
+    const questions = parsed.questions || [];
+    const markScheme = parsed.markScheme || [];
+
+    logger.info(`Parsed ${questions.length} questions, ${markScheme.length} mark scheme entries in ONE call`);
+    return { questions, markScheme };
 
   } catch (error) {
-    logger.error('Gemini failed to parse question paper:', error);
-    return [];
-  }
-}
-
-async function parseMarkScheme(
-  markSchemeText: string,
-  parsedQuestions: any[]
-): Promise<any[]> {
-
-  logger.info('Gemini: Parsing mark scheme...');
-
-  const prompt = `
-Extract the KEY MARKING CRITERIA from this mark scheme.
-For each question identify:
-1. Required keywords (must appear for full marks)
-2. Accept alternatives (other valid phrasings)
-3. Reject list (wrong answers that look correct)
-4. Method marks (marks for correct approach even if answer wrong)
-
-MARK SCHEME:
-${markSchemeText}
-
-QUESTIONS FROM PAPER (use these to match question numbers):
-${JSON.stringify(parsedQuestions, null, 2)}
-
-Return ONLY a valid JSON array. No markdown.
-
-Format:
-[
-  {
-    "questionNumber": "1a",
-    "requiredKeywords": ["must appear for full marks"],
-    "acceptAlternatives": ["other valid phrasings"],
-    "rejectList": ["wrong answers that look correct"],
-    "methodMarks": "marks for correct approach even if answer wrong"
-  }
-]`;
-
-  try {
-    const response = await groqWithRetry(prompt);
-
-    const text = extractJSON(response.text || '[]', 'array');
-    const parsed = JSON.parse(text);
-
-    logger.info(`Gemini parsed ${parsed.length} mark scheme entries`);
-    return parsed;
-
-  } catch (error) {
-    logger.error('Gemini failed to parse mark scheme:', error);
-    return [];
+    logger.error('Failed to parse question paper and mark scheme:', error);
+    return { questions: [], markScheme: [] };
   }
 }
 
@@ -1242,53 +1218,66 @@ async function startServer() {
           });
         }
 
-        const base64Pdf = req.file.buffer.toString('base64');
-        logger.info(`PDF base64 size: ${(base64Pdf.length / 1024 / 1024).toFixed(2)} MB`);
+        // Check OCR cache first — prevents duplicate API calls on same file
+        const fileHash = getFileHash(req.file.buffer);
+        const cached = ocrCache.get(fileHash);
 
-        try {
-          const response = await callGeminiSafe(
-            [{
-              role: 'user',
-              parts: [
-                {
-                  inlineData: {
-                    mimeType: 'application/pdf',
-                    data: base64Pdf
-                  }
-                },
-                {
-                  text: `This is a handwritten student exam answer sheet. 
+        if (cached && Date.now() - cached.timestamp < 3600000) { // 1 hour cache
+          logger.info(`Using cached OCR result for duplicate file upload (hash: ${fileHash.substring(0, 8)}...)`);
+          extractedText = cached.text;
+          method = 'gemini-vision-cached';
+        } else {
+          const base64Pdf = req.file.buffer.toString('base64');
+          logger.info(`PDF base64 size: ${(base64Pdf.length / 1024 / 1024).toFixed(2)} MB`);
+
+          try {
+            const response = await callGeminiSafe(
+              [{
+                role: 'user',
+                parts: [
+                  {
+                    inlineData: {
+                      mimeType: 'application/pdf',
+                      data: base64Pdf
+                    }
+                  },
+                  {
+                    text: `This is a handwritten student exam answer sheet. 
 Please carefully extract and transcribe ALL text you can see. 
 Preserve the structure including question numbers, student answers, 
 and any written content. Be as accurate as possible.
 
 If you cannot read this document at all, respond with exactly: 
 "UNREADABLE_DOCUMENT"`
-                }
-              ]
-            }],
-            { context: `OCR-${req.file.originalname}`, maxRetries: 3 }
-          );
+                  }
+                ]
+              }],
+              { context: `OCR-${req.file.originalname}`, maxRetries: 3 }
+            );
 
-          const resultText = response.text?.trim() || '';
+            const resultText = response.text?.trim() || '';
 
-          if (resultText === 'UNREADABLE_DOCUMENT' || resultText.length === 0) {
-            throw new Error('Gemini could not read this handwritten PDF. The scan quality may be too low.');
+            if (resultText === 'UNREADABLE_DOCUMENT' || resultText.length === 0) {
+              throw new Error('Gemini could not read this handwritten PDF. The scan quality may be too low.');
+            }
+
+            extractedText = resultText;
+            logger.info(`Gemini OCR succeeded for ${req.file.originalname}: ${extractedText.length} chars`);
+
+            // Cache the result for future duplicate uploads
+            ocrCache.set(fileHash, { text: extractedText, timestamp: Date.now() });
+
+          } catch (geminiError: any) {
+            logger.error('═══════════════════════════════════════');
+            logger.error('GEMINI OCR FAILED - FULL ERROR DETAILS:');
+            logger.error('Error message:', geminiError.message);
+            logger.error('Error status:', geminiError.status);
+            logger.error('Error code:', geminiError.code);
+            logger.error('Full error object:', JSON.stringify(geminiError, null, 2));
+            logger.error('═══════════════════════════════════════');
+
+            throw new Error(`OCR failed: ${geminiError.message || 'Unknown error'}`);
           }
-
-          extractedText = resultText;
-          logger.info(`Gemini OCR succeeded for ${req.file.originalname}: ${extractedText.length} chars`);
-
-        } catch (geminiError: any) {
-          logger.error('═══════════════════════════════════════');
-          logger.error('GEMINI OCR FAILED - FULL ERROR DETAILS:');
-          logger.error('Error message:', geminiError.message);
-          logger.error('Error status:', geminiError.status);
-          logger.error('Error code:', geminiError.code);
-          logger.error('Full error object:', JSON.stringify(geminiError, null, 2));
-          logger.error('═══════════════════════════════════════');
-
-          throw new Error(`OCR failed: ${geminiError.message || 'Unknown error'}`);
         }
       }
 
@@ -2019,8 +2008,7 @@ If you cannot read this document at all, respond with exactly:
       const questionPdfText = await downloadTextFromSupabase(session.questionTextUrl || '');
       const markSchemeText = await downloadTextFromSupabase(session.markSchemeTextUrl || '');
       
-      const parsedQuestions = await parseQuestionPaper(questionPdfText);
-      const parsedMarkScheme = await parseMarkScheme(markSchemeText, parsedQuestions);
+      const { questions: parsedQuestions, markScheme: parsedMarkScheme } = await parseQuestionPaperAndMarkScheme(questionPdfText, markSchemeText);
 
       // Re-mark logic
       const resultData = await markStudentAnswers(
