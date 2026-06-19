@@ -127,7 +127,11 @@ const NewSessionPage = () => {
       return;
     }
 
-    setter((prev: any) => ({ ...prev, file, uploading: true }));
+    setter((prev: any) => {
+      // Prevent duplicate uploads while one is already in progress
+      if (prev.uploading) return prev;
+      return { ...prev, file, uploading: true };
+    });
 
     const formData = new FormData();
     formData.append('file', file);
@@ -396,7 +400,8 @@ const NewSessionPage = () => {
           <div className="space-y-4">
             <Loader2 size={32} className="mx-auto text-accent animate-spin" />
             <div className="space-y-1">
-              <p className="text-xs font-bold text-navy">Uploading {fileData.file?.name}...</p>
+              <p className="text-xs font-bold text-navy">Processing {fileData.file?.name}...</p>
+              <p className="text-[10px] text-text-muted mt-1">AI requests are queued to avoid rate limits, this may take a moment.</p>
               <div className="w-full bg-border rounded-full h-1 overflow-hidden">
                 <motion.div 
                   initial={{ width: 0 }} 

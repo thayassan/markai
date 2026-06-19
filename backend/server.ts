@@ -198,47 +198,130 @@ function getGenAI(): GoogleGenAI {
   return getActiveGenAI().client;
 }
 
-// ─── Gemini Retry Wrapper with Exponential Backoff ──────────────────────────
-async function callGeminiWithRetry(
-  contents: any,
-  maxRetries: number = 3
-): Promise<any> {
-  let lastError: any;
+// ─────────────────────────────────────────────────
+// GEMINI REQUEST QUEUE
+// Ensures we never fire more than N requests per minute
+// Prevents rate limit errors from parallel/rapid calls
+// ─────────────────────────────────────────────────
+class GeminiQueue {
+  private queue: Array<() => Promise<void>> = [];
+  private processing = false;
+  private requestTimestamps: number[] = [];
+  private readonly maxRequestsPerMinute = 12; // stay under 15 RPM free tier limit
 
-  for (let attempt = 1; attempt <= maxRetries; attempt++) {
-    try {
-      const response = await getGenAI().models.generateContent({
-        model: 'gemini-2.0-flash',
-        contents
+  async enqueue<T>(task: () => Promise<T>): Promise<T> {
+    return new Promise((resolve, reject) => {
+      this.queue.push(async () => {
+        try {
+          const result = await task();
+          resolve(result);
+        } catch (error) {
+          reject(error);
+        }
       });
-      return response;
-    } catch (error: any) {
-      lastError = error;
-      const isRateLimit = error.message?.includes('429') || 
-                           error.message?.includes('RESOURCE_EXHAUSTED');
+      this.processQueue();
+    });
+  }
 
-      if (isRateLimit && attempt < maxRetries) {
-        const waitMs = Math.pow(2, attempt) * 1000; // 2s, 4s, 8s
-        logger.warn(`Rate limited, retrying in ${waitMs}ms (attempt ${attempt}/${maxRetries})`);
-        await new Promise(resolve => setTimeout(resolve, waitMs));
+  private async processQueue() {
+    if (this.processing) return;
+    this.processing = true;
+
+    while (this.queue.length > 0) {
+      // Clean timestamps older than 60 seconds
+      const now = Date.now();
+      this.requestTimestamps = this.requestTimestamps.filter(
+        t => now - t < 60000
+      );
+
+      // Wait if we're at the rate limit
+      if (this.requestTimestamps.length >= this.maxRequestsPerMinute) {
+        const oldestTimestamp = this.requestTimestamps[0];
+        const waitTime = 60000 - (now - oldestTimestamp) + 500; // +500ms buffer
+        logger.info(`Gemini queue: throttling, waiting ${waitTime}ms`);
+        await new Promise(resolve => setTimeout(resolve, waitTime));
         continue;
       }
 
-      // Not a rate limit, or out of retries — fail immediately
-      throw error;
+      const task = this.queue.shift();
+      if (task) {
+        this.requestTimestamps.push(Date.now());
+        await task();
+        // Small delay between requests to be safe
+        await new Promise(resolve => setTimeout(resolve, 1500));
+      }
     }
+
+    this.processing = false;
   }
 
-  throw lastError;
+  getQueueLength(): number {
+    return this.queue.length;
+  }
+}
+
+const geminiQueue = new GeminiQueue();
+
+// ─── Queue + Retry wrapper for ALL Gemini calls ─────────────────────────────
+async function callGeminiSafe(
+  contents: any,
+  options: { maxRetries?: number; context?: string } = {}
+): Promise<any> {
+  const { maxRetries = 3, context = 'unknown' } = options;
+
+  return geminiQueue.enqueue(async () => {
+    let lastError: any;
+
+    for (let attempt = 1; attempt <= maxRetries; attempt++) {
+      try {
+        logger.info(`Gemini call [${context}] attempt ${attempt}/${maxRetries}`);
+
+        const response = await getGenAI().models.generateContent({
+          model: 'gemini-2.0-flash',
+          contents
+        });
+
+        return response;
+
+      } catch (error: any) {
+        lastError = error;
+
+        const errorMsg = error.message || '';
+        const isRateLimit = 
+          errorMsg.includes('429') || 
+          errorMsg.includes('RESOURCE_EXHAUSTED') ||
+          errorMsg.includes('quota');
+
+        logger.error(`Gemini call [${context}] failed:`, {
+          attempt,
+          message: errorMsg,
+          isRateLimit
+        });
+
+        if (isRateLimit && attempt < maxRetries) {
+          // Exponential backoff: 5s, 15s, 30s
+          const waitMs = attempt === 1 ? 5000 : attempt === 2 ? 15000 : 30000;
+          logger.warn(`Rate limited [${context}], waiting ${waitMs}ms before retry ${attempt + 1}`);
+          await new Promise(resolve => setTimeout(resolve, waitMs));
+          continue;
+        }
+
+        // Not a rate limit OR out of retries
+        throw lastError;
+      }
+    }
+
+    throw lastError;
+  });
 }
 
 // ─── Gemini Model Startup Verification ──────────────────────────────────────
 async function verifyGeminiModel(): Promise<boolean> {
   try {
-    const testResponse = await getGenAI().models.generateContent({
-      model: 'gemini-2.0-flash',
-      contents: 'Say "OK" if you can read this.'
-    });
+    const testResponse = await callGeminiSafe(
+      'Say "OK" if you can read this.',
+      { context: 'startup-verification', maxRetries: 1 }
+    );
     logger.info(`✅ Gemini model verified: ${testResponse.text}`);
     return true;
   } catch (error: any) {
@@ -751,6 +834,16 @@ async function startServer() {
   // PING ROUTE - Basic connectivity test
   app.get('/api/ping', (req, res) => res.json({ status: 'alive', timestamp: new Date() }));
 
+  // AI Queue Status — lets frontend show "AI is busy" instead of confusing errors
+  app.get('/api/ai/queue-status', authMiddleware, (req, res) => {
+    res.json({
+      queueLength: geminiQueue.getQueueLength(),
+      message: geminiQueue.getQueueLength() > 0 
+        ? `${geminiQueue.getQueueLength()} requests waiting in queue`
+        : 'Ready'
+    });
+  });
+
   // J. All API Routes
   app.get('/api/health', async (req, res) => {
     try {
@@ -1138,9 +1231,9 @@ async function startServer() {
 
       if (extractedText.length < 50) {
         method = 'gemini-vision';
-        logger.info(`Handwriting detected for ${req.file.originalname}, attempting Gemini OCR...`);
+        logger.info(`Handwriting detected for ${req.file.originalname}, queueing Gemini OCR...`);
 
-        // STEP 5: File size check before sending to Gemini
+        // File size check before sending to Gemini
         const fileSizeMB = req.file.buffer.length / 1024 / 1024;
         if (fileSizeMB > 15) {
           logger.warn(`File too large for inline Gemini Vision: ${fileSizeMB.toFixed(2)}MB`);
@@ -1152,39 +1245,41 @@ async function startServer() {
         const base64Pdf = req.file.buffer.toString('base64');
         logger.info(`PDF base64 size: ${(base64Pdf.length / 1024 / 1024).toFixed(2)} MB`);
 
-        const ocrPrompt = `This is a handwritten student exam answer sheet PDF. 
-Carefully extract and transcribe ALL text you can see, preserving 
-question numbers and answer structure. If you cannot read this 
-document at all, respond with exactly: "UNREADABLE_DOCUMENT"`;
-
         try {
-          // STEP 6: Use retry wrapper with exponential backoff
-          const response = await callGeminiWithRetry([{
-            role: 'user',
-            parts: [
-              {
-                inlineData: {
-                  mimeType: 'application/pdf',
-                  data: base64Pdf
+          const response = await callGeminiSafe(
+            [{
+              role: 'user',
+              parts: [
+                {
+                  inlineData: {
+                    mimeType: 'application/pdf',
+                    data: base64Pdf
+                  }
+                },
+                {
+                  text: `This is a handwritten student exam answer sheet. 
+Please carefully extract and transcribe ALL text you can see. 
+Preserve the structure including question numbers, student answers, 
+and any written content. Be as accurate as possible.
+
+If you cannot read this document at all, respond with exactly: 
+"UNREADABLE_DOCUMENT"`
                 }
-              },
-              {
-                text: ocrPrompt
-              }
-            ]
-          }]);
+              ]
+            }],
+            { context: `OCR-${req.file.originalname}`, maxRetries: 3 }
+          );
 
           const resultText = response.text?.trim() || '';
 
           if (resultText === 'UNREADABLE_DOCUMENT' || resultText.length === 0) {
-            throw new Error('Gemini could not read the handwritten PDF. The file may be corrupted, too large, or in an unsupported format.');
+            throw new Error('Gemini could not read this handwritten PDF. The scan quality may be too low.');
           }
 
           extractedText = resultText;
-          logger.info(`Gemini OCR succeeded, extracted ${extractedText.length} characters`);
+          logger.info(`Gemini OCR succeeded for ${req.file.originalname}: ${extractedText.length} chars`);
 
         } catch (geminiError: any) {
-          // STEP 1: LOG THE FULL ERROR — critical to find the real cause
           logger.error('═══════════════════════════════════════');
           logger.error('GEMINI OCR FAILED - FULL ERROR DETAILS:');
           logger.error('Error message:', geminiError.message);
@@ -1193,8 +1288,7 @@ document at all, respond with exactly: "UNREADABLE_DOCUMENT"`;
           logger.error('Full error object:', JSON.stringify(geminiError, null, 2));
           logger.error('═══════════════════════════════════════');
 
-          // Re-throw with the REAL error message instead of a generic one
-          throw new Error(`Gemini OCR failed: ${geminiError.message || 'Unknown error'}`);
+          throw new Error(`OCR failed: ${geminiError.message || 'Unknown error'}`);
         }
       }
 
@@ -1439,10 +1533,10 @@ document at all, respond with exactly: "UNREADABLE_DOCUMENT"`;
             } catch (e) { /* pdf-parse failed */ }
             if (questionPdfText.length < 50) {
               const base64 = buffer.toString('base64');
-              const resp = await getGenAI().models.generateContent({
-                model: 'gemini-2.0-flash',
-                contents: [{ parts: [{ inlineData: { data: base64, mimeType: 'application/pdf' } }, { text: 'Extract ALL text from this exam question paper. Preserve question numbers and marks. Return only the text content.' }] }]
-              });
+              const resp = await callGeminiSafe(
+                [{ parts: [{ inlineData: { data: base64, mimeType: 'application/pdf' } }, { text: 'Extract ALL text from this exam question paper. Preserve question numbers and marks. Return only the text content.' }] }],
+                { context: 'reextract-question-paper' }
+              );
               questionPdfText = resp.text?.trim() || '';
             }
             if (questionPdfText.length >= 10) {
@@ -1487,10 +1581,10 @@ document at all, respond with exactly: "UNREADABLE_DOCUMENT"`;
             } catch (e) { /* pdf-parse failed */ }
             if (markSchemeText.length < 50) {
               const base64 = buffer.toString('base64');
-              const resp = await getGenAI().models.generateContent({
-                model: 'gemini-2.0-flash',
-                contents: [{ parts: [{ inlineData: { data: base64, mimeType: 'application/pdf' } }, { text: 'Extract ALL text from this mark scheme. Preserve question numbers, accepted answers, marks, and marking guidance. Return only the text content.' }] }]
-              });
+              const resp = await callGeminiSafe(
+                [{ parts: [{ inlineData: { data: base64, mimeType: 'application/pdf' } }, { text: 'Extract ALL text from this mark scheme. Preserve question numbers, accepted answers, marks, and marking guidance. Return only the text content.' }] }],
+                { context: 'reextract-mark-scheme' }
+              );
               markSchemeText = resp.text?.trim() || '';
             }
             if (markSchemeText.length >= 10) {
@@ -1659,13 +1753,13 @@ document at all, respond with exactly: "UNREADABLE_DOCUMENT"`;
                   } catch (e) { /* pdf-parse failed */ }
                   if (!studentAnswerText || studentAnswerText.length < 50) {
                     const base64 = buffer.toString('base64');
-                    const ocrResp = await getGenAI().models.generateContent({
-                      model: 'gemini-2.0-flash',
-                      contents: [{ parts: [
+                    const ocrResp = await callGeminiSafe(
+                      [{ parts: [
                         { inlineData: { data: base64, mimeType: 'application/pdf' } },
                         { text: 'This is a student exam answer sheet. Transcribe ALL content. Preserve question numbers (Q1, 1a, etc). If handwritten, do your best to read it. Format: Q[number]:\n[answer]' }
-                      ] }]
-                    });
+                      ] }],
+                      { context: `reextract-student-${sheet.studentId}` }
+                    );
                     studentAnswerText = ocrResp.text?.trim() || '';
                   }
                   if (studentAnswerText.length >= 5) {
