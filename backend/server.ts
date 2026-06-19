@@ -53,7 +53,6 @@ const __dirname = path.dirname(__filename);
 // B. Environment Validation
 const requiredEnvVars = [
   'JWT_SECRET',
-  'GEMINI_API_KEY',
   'SUPABASE_URL',
   'SUPABASE_SERVICE_ROLE_KEY',
   'DATABASE_URL'
@@ -64,6 +63,19 @@ for (const envVar of requiredEnvVars) {
     console.error(`❌ Missing required environment variable: ${envVar}`);
     process.exit(1);
   }
+}
+
+const hasAnyGeminiKey =
+  process.env.GEMINI_API_KEY_1 ||
+  process.env.GEMINI_API_KEY_2 ||
+  process.env.GEMINI_API_KEY_3 ||
+  process.env.GEMINI_API_KEY_4 ||
+  process.env.GEMINI_API_KEY_5 ||
+  process.env.GEMINI_API_KEY;
+
+if (!hasAnyGeminiKey) {
+  console.error('❌ No Gemini API keys found. Set at least GEMINI_API_KEY_1.');
+  process.exit(1);
 }
 
 const directUrl = process.env.DIRECT_URL;
@@ -151,126 +163,155 @@ function getActiveGroq(): { client: any; keyIndex: number } {
 }
 
 // ─── Gemini Key Pool with Automatic Rotation ───────────────────────────────
-// Add keys as GEMINI_API_KEY_1, GEMINI_API_KEY_2, ... in .env
-// Falls back to GEMINI_API_KEY for backward compatibility
-const geminiKeyPool: string[] = [];
-for (let i = 1; ; i++) {
-  const key = process.env[`GEMINI_API_KEY_${i}`];
-  if (!key) break;
-  geminiKeyPool.push(key);
-}
-if (geminiKeyPool.length === 0 && process.env.GEMINI_API_KEY) {
-  geminiKeyPool.push(process.env.GEMINI_API_KEY);
+interface KeyState {
+  key: string;
+  client: GoogleGenAI;
+  requestTimestamps: number[]; // for RPM tracking
+  dailyCount: number;
+  dailyResetAt: number;
+  cooldownUntil: number; // 0 if not in cooldown
+  label: string;
 }
 
-if (geminiKeyPool.length === 0) {
-  console.error('❌ No Gemini API keys configured. Set GEMINI_API_KEY or GEMINI_API_KEY_1 in .env');
-  process.exit(1);
-}
+class GeminiKeyPool {
+  private keys: KeyState[] = [];
+  private currentIndex = 0;
+  private waitingCallsCount = 0;
 
-logger.info(`🔑 Gemini key pool initialized with ${geminiKeyPool.length} key(s)`);
+  constructor() {
+    const rawKeys = [
+      process.env.GEMINI_API_KEY_1,
+      process.env.GEMINI_API_KEY_2,
+      process.env.GEMINI_API_KEY_3,
+      process.env.GEMINI_API_KEY_4,
+      process.env.GEMINI_API_KEY_5,
+      process.env.GEMINI_API_KEY // fallback single key
+    ].filter((k): k is string => !!k);
 
-let currentKeyIndex = 0;
-const exhaustedKeys = new Set<number>(); // tracks keys that hit daily quota
-
-// Reset exhausted key tracking every hour
-setInterval(() => {
-  if (exhaustedKeys.size > 0) {
-    logger.info(`Resetting exhausted Gemini key tracking (${exhaustedKeys.size} keys)`);
-    exhaustedKeys.clear();
-  }
-}, 60 * 60 * 1000);
-
-function getActiveGenAI(): { client: GoogleGenAI; keyIndex: number } {
-  // Find next non-exhausted key
-  for (let i = 0; i < geminiKeyPool.length; i++) {
-    const idx = (currentKeyIndex + i) % geminiKeyPool.length;
-    if (!exhaustedKeys.has(idx)) {
-      currentKeyIndex = idx;
-      return { client: new GoogleGenAI({ apiKey: geminiKeyPool[idx] }), keyIndex: idx };
+    if (rawKeys.length === 0) {
+      throw new Error('No Gemini API keys configured. Set GEMINI_API_KEY_1 through GEMINI_API_KEY_5.');
     }
+
+    this.keys = rawKeys.map((key, i) => ({
+      key,
+      client: new GoogleGenAI({ apiKey: key }),
+      requestTimestamps: [],
+      dailyCount: 0,
+      dailyResetAt: new Date().setHours(24, 0, 0, 0),
+      cooldownUntil: 0,
+      label: `key-${i + 1}`
+    }));
+
+    logger.info(`Gemini key pool initialized with ${this.keys.length} keys`);
   }
-  // All keys exhausted — reset and use first
-  exhaustedKeys.clear();
-  currentKeyIndex = 0;
-  logger.warn('All Gemini API keys exhausted — resetting pool and retrying from key 1');
-  return { client: new GoogleGenAI({ apiKey: geminiKeyPool[0] }), keyIndex: 0 };
-}
 
-// Legacy helper — some code paths (OCR, /api/ai/generate) call this directly
-function getGenAI(): GoogleGenAI {
-  return getActiveGenAI().client;
-}
+  // Find the next key that's actually usable right now
+  private getAvailableKey(): KeyState | null {
+    const now = Date.now();
 
-// ─────────────────────────────────────────────────
-// GEMINI REQUEST QUEUE
-// Ensures we never fire more than N requests per minute
-// Prevents rate limit errors from parallel/rapid calls
-// Free tier: 10 RPM for gemini-2.0-flash
-// ─────────────────────────────────────────────────
-class GeminiQueue {
-  private queue: Array<() => Promise<void>> = [];
-  private processing = false;
-  private requestTimestamps: number[] = [];
-  private readonly maxRequestsPerMinute = 8; // stay safely under the 10 RPM ceiling
+    for (let attempts = 0; attempts < this.keys.length; attempts++) {
+      const candidate = this.keys[this.currentIndex];
+      this.currentIndex = (this.currentIndex + 1) % this.keys.length;
 
-  async enqueue<T>(task: () => Promise<T>): Promise<T> {
-    return new Promise((resolve, reject) => {
-      this.queue.push(async () => {
-        try {
-          resolve(await task());
-        } catch (error) {
-          reject(error);
+      // Reset daily counter if day has rolled over
+      if (now > candidate.dailyResetAt) {
+        candidate.dailyCount = 0;
+        candidate.dailyResetAt = new Date().setHours(24, 0, 0, 0);
+      }
+
+      // Clean RPM window
+      candidate.requestTimestamps = candidate.requestTimestamps.filter(t => now - t < 60000);
+
+      const isInCooldown = candidate.cooldownUntil > now;
+      const isOverRpm = candidate.requestTimestamps.length >= 8; // safe margin under the 10 RPM real limit
+      const isOverRpd = candidate.dailyCount >= 18; // safe margin under the 20 RPD real limit
+
+      if (!isInCooldown && !isOverRpm && !isOverRpd) {
+        return candidate;
+      }
+    }
+
+    return null; // every key is currently exhausted
+  }
+
+  async call(contents: any, context: string = 'unknown', maxWaitMs: number = 90000): Promise<any> {
+    const startTime = Date.now();
+    let hasWaited = false;
+
+    try {
+      while (Date.now() - startTime < maxWaitMs) {
+        const keyState = this.getAvailableKey();
+
+        if (!keyState) {
+          if (!hasWaited) {
+            this.waitingCallsCount++;
+            hasWaited = true;
+          }
+          logger.warn(`All ${this.keys.length} Gemini keys are exhausted, waiting 5s before recheck [${context}]`);
+          await new Promise(resolve => setTimeout(resolve, 5000));
+          continue;
         }
-      });
-      this.processQueue();
-    });
-  }
 
-  private async processQueue() {
-    if (this.processing) return;
-    this.processing = true;
+        if (hasWaited) {
+          this.waitingCallsCount--;
+          hasWaited = false;
+        }
 
-    while (this.queue.length > 0) {
-      const now = Date.now();
-      this.requestTimestamps = this.requestTimestamps.filter(t => now - t < 60000);
+        try {
+          keyState.requestTimestamps.push(Date.now());
+          keyState.dailyCount++;
 
-      if (this.requestTimestamps.length >= this.maxRequestsPerMinute) {
-        const waitTime = 60000 - (now - this.requestTimestamps[0]) + 2000;
-        logger.info(`Gemini queue: throttling, waiting ${Math.round(waitTime / 1000)}s`);
-        await new Promise(resolve => setTimeout(resolve, waitTime));
-        continue;
+          logger.info(`Gemini call [${context}] using ${keyState.label} (daily: ${keyState.dailyCount}/20, rpm window: ${keyState.requestTimestamps.length}/8)`);
+
+          const response = await keyState.client.models.generateContent({
+            model: 'gemini-2.5-flash-lite',
+            contents
+          });
+
+          return response;
+
+        } catch (error: any) {
+          const errorMsg = error.message || '';
+          const isRateLimit = errorMsg.includes('429') || errorMsg.includes('RESOURCE_EXHAUSTED');
+
+          if (isRateLimit) {
+            logger.warn(`${keyState.label} hit rate limit on [${context}], cooling down and trying next key`);
+            keyState.cooldownUntil = Date.now() + 60000; // 60s cooldown for this specific key
+            continue; // loop will pick a different key automatically
+          }
+
+          // Non-rate-limit error — don't burn through all keys for a real bug
+          logger.error(`Gemini call [${context}] failed with non-rate-limit error on ${keyState.label}:`, errorMsg);
+          throw error;
+        }
       }
-
-      const task = this.queue.shift();
-      if (task) {
-        this.requestTimestamps.push(Date.now());
-        await task();
-        await new Promise(resolve => setTimeout(resolve, 3000)); // 3s gap, free tier safe
+    } finally {
+      if (hasWaited) {
+        this.waitingCallsCount--;
       }
     }
-    this.processing = false;
+
+    throw new Error(`All Gemini API keys are rate limited or exhausted. Please wait a few minutes, or type the answer manually.`);
   }
 
-  getQueueLength(): number {
-    return this.queue.length;
+  getStatus() {
+    const now = Date.now();
+    return this.keys.map(k => ({
+      label: k.label,
+      dailyUsed: k.dailyCount,
+      dailyLimit: 20,
+      rpmUsed: k.requestTimestamps.filter(t => now - t < 60000).length,
+      rpmLimit: 8,
+      inCooldown: k.cooldownUntil > now
+    }));
+  }
+
+  getWaitingCallsCount(): number {
+    return this.waitingCallsCount;
   }
 }
 
-const geminiQueue = new GeminiQueue();
-
-// ─── Daily Call Tracker ─────────────────────────────────────────────────────
-let dailyCallCount = 0;
-let dailyResetTime = new Date().setHours(24, 0, 0, 0);
-
-function trackGeminiCall() {
-  if (Date.now() > dailyResetTime) {
-    dailyCallCount = 0;
-    dailyResetTime = new Date().setHours(24, 0, 0, 0);
-  }
-  dailyCallCount++;
-  logger.info(`Gemini calls today: ${dailyCallCount} / ~1500 free tier limit`);
-}
+const geminiPool = new GeminiKeyPool();
 
 // ─── OCR Result Cache (prevents duplicate API calls on same file) ───────────
 const ocrCache = new Map<string, { text: string; timestamp: number }>();
@@ -282,73 +323,10 @@ function getFileHash(buffer: Buffer): string {
 // ─── Queue + Retry wrapper for ALL Gemini calls ─────────────────────────────
 async function callGeminiSafe(
   contents: any,
-  options: { maxRetries?: number; context?: string } = {}
+  options: { context?: string } = {}
 ): Promise<any> {
-  const { maxRetries = 3, context = 'unknown' } = options;
-
-  return geminiQueue.enqueue(async () => {
-    let lastError: any;
-
-    for (let attempt = 1; attempt <= maxRetries; attempt++) {
-      try {
-        logger.info(`Gemini call [${context}] handled by instance ${processId}, attempt ${attempt}/${maxRetries}`);
-        trackGeminiCall();
-
-        const response = await getGenAI().models.generateContent({
-          model: 'gemini-2.0-flash',
-          contents
-        });
-
-        return response;
-
-      } catch (error: any) {
-        lastError = error;
-
-        const errorMsg = error.message || '';
-        const errorBody = error.response?.data || error.errorDetails || '';
-
-        // Try to detect WHICH quota was hit from the error details
-        const fullErrorText = `${errorMsg} ${JSON.stringify(errorBody)}`.toLowerCase();
-
-        const isDailyQuota = fullErrorText.includes('per day') ||
-                              fullErrorText.includes('requestsperday') ||
-                              fullErrorText.includes('rpd');
-
-        const isPerMinuteQuota = fullErrorText.includes('per minute') ||
-                                  fullErrorText.includes('requestsperminute') ||
-                                  fullErrorText.includes('rpm') ||
-                                  (!isDailyQuota && (errorMsg.includes('429') || errorMsg.includes('RESOURCE_EXHAUSTED')));
-
-        logger.error(`Gemini call [${context}] failed:`, {
-          attempt,
-          message: errorMsg,
-          isDailyQuota,
-          isPerMinuteQuota,
-          fullErrorText: fullErrorText.substring(0, 500)
-        });
-
-        if (isDailyQuota) {
-          // Don't retry at all — this won't clear for hours
-          const dailyError: any = new Error(
-            'Daily AI quota has been used up for today. This resets at midnight Pacific Time. Please type answers manually until then.'
-          );
-          dailyError.isDailyQuota = true;
-          throw dailyError;
-        }
-
-        if (isPerMinuteQuota && attempt < maxRetries) {
-          const waitMs = attempt === 1 ? 15000 : attempt === 2 ? 30000 : 60000;
-          logger.warn(`Per-minute rate limited [${context}], waiting ${waitMs / 1000}s before retry`);
-          await new Promise(resolve => setTimeout(resolve, waitMs));
-          continue;
-        }
-
-        throw lastError;
-      }
-    }
-
-    throw lastError;
-  });
+  const { context = 'unknown' } = options;
+  return geminiPool.call(contents, context);
 }
 
 // ─── Gemini Model Startup Verification ──────────────────────────────────────
@@ -356,13 +334,13 @@ async function verifyGeminiModel(): Promise<boolean> {
   try {
     const testResponse = await callGeminiSafe(
       'Say "OK" if you can read this.',
-      { context: 'startup-verification', maxRetries: 1 }
+      { context: 'startup-verification' }
     );
     logger.info(`✅ Gemini model verified: ${testResponse.text}`);
     return true;
   } catch (error: any) {
     logger.error('❌ Gemini model verification FAILED:', error.message);
-    logger.error('This means gemini-2.0-flash may not be available with your API key/region.');
+    logger.error('This means gemini-2.5-flash-lite may not be available with your API key/region.');
     return false;
   }
 }
@@ -833,12 +811,17 @@ async function startServer() {
 
   // AI Queue Status — lets frontend show "AI is busy" instead of confusing errors
   app.get('/api/ai/queue-status', authMiddleware, (req, res) => {
+    const len = geminiPool.getWaitingCallsCount();
     res.json({
-      queueLength: geminiQueue.getQueueLength(),
-      message: geminiQueue.getQueueLength() > 0 
-        ? `${geminiQueue.getQueueLength()} requests waiting in queue`
+      queueLength: len,
+      message: len > 0 
+        ? `${len} requests waiting in queue`
         : 'Ready'
     });
+  });
+
+  app.get('/api/ai/pool-status', authMiddleware, (req, res) => {
+    res.json({ keys: geminiPool.getStatus() });
   });
 
   // J. All API Routes
@@ -1304,7 +1287,7 @@ Q[number]:
                       { text: ocrPrompt }
                     ]
                   }],
-                  { context: `OCR-${req.file!.originalname}`, maxRetries: 3 }
+                  { context: `OCR-${req.file!.originalname}` }
                 );
 
                 const resultText = response.text?.trim() || '';
