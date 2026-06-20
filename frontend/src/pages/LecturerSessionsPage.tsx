@@ -1,4 +1,4 @@
-import React, { useState } from 'react';
+import React, { useState, useEffect } from 'react';
 import { DashboardLayout } from '@/src/components/DashboardLayout';
 import { 
   FileText, Search, Filter, MoreVertical, Calendar, 
@@ -52,7 +52,7 @@ const LecturerSessionsPage = () => {
   };
 
   // Queries
-  const { data: sessionsData, isLoading, isError } = useQuery({
+  const { data: sessionsData, isLoading, isError, refetch: refetchSessions } = useQuery({
     queryKey: ['sessions', statusFilter],
     queryFn: () => {
       const url = new URL('/api/sessions', window.location.origin);
@@ -63,6 +63,19 @@ const LecturerSessionsPage = () => {
       });
     }
   });
+
+  // Poll sessions list while any session is currently MARKING
+  useEffect(() => {
+    const sessions = sessionsData?.data || [];
+    const hasMarking = sessions.some((s: any) => s.status === 'MARKING');
+    if (!hasMarking) return;
+
+    const interval = setInterval(() => {
+      refetchSessions();
+    }, 5000);
+
+    return () => clearInterval(interval);
+  }, [sessionsData?.data, refetchSessions]);
 
   const selectedSession = sessionsData?.data?.find((s: any) => s.id === selectedSessionId);
 
@@ -184,7 +197,12 @@ const LecturerSessionsPage = () => {
                     <td className="px-8 py-5">
                       <div className="flex items-center gap-2">
                         <Users size={14} className="text-text-muted" />
-                        <span className="text-sm font-bold text-navy">{session?._count?.results ?? 0}</span>
+                        <span className="text-sm font-bold text-navy">
+                          {session.status === 'MARKING'
+                            ? `${session?._count?.results ?? 0} / ${session?._count?.answerSheets ?? 0}`
+                            : `${session?._count?.results ?? 0}`
+                          }
+                        </span>
                       </div>
                     </td>
                     <td className="px-8 py-5">
@@ -264,7 +282,12 @@ const LecturerSessionsPage = () => {
                 <div className="grid grid-cols-2 gap-4 mb-8">
                    <div className="bg-bg p-4 rounded-xl">
                       <p className="text-[10px] font-bold text-text-muted uppercase tracking-widest mb-1">Students</p>
-                      <p className="text-2xl font-serif font-bold text-navy">{selectedSession?._count?.results || 0}</p>
+                      <p className="text-2xl font-serif font-bold text-navy">
+                        {selectedSession?.status === 'MARKING'
+                          ? `${selectedSession?._count?.results ?? 0} / ${selectedSession?._count?.answerSheets ?? 0}`
+                          : `${selectedSession?._count?.results ?? 0}`
+                        }
+                      </p>
                    </div>
                    <div className="bg-bg p-4 rounded-xl">
                       <p className="text-[10px] font-bold text-text-muted uppercase tracking-widest mb-1">Avg Score</p>

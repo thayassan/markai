@@ -550,6 +550,13 @@ async function markStudentAnswers(
   console.log('❓ Questions count:', parsedQuestions?.length);
   console.log('📊 Mark scheme count:', parsedMarkScheme?.length);
 
+  // CRITICAL DIAGNOSTIC — confirm the parameter actually received
+  logger.info(`markStudentAnswers() received studentAnswerText: length=${studentAnswerText?.length || 0}, first 150 chars: "${(studentAnswerText || '').substring(0, 150)}"`);
+
+  if (!studentAnswerText || studentAnswerText.trim().length === 0) {
+    logger.error(`🚨 markStudentAnswers() received an EMPTY studentAnswerText parameter for ${studentId}. This is the bug.`);
+  }
+
   logger.info(`Gemini: Marking student ${studentId}...`);
 
   // Build strictness instruction based on session setting
@@ -678,9 +685,15 @@ JSON Structure:
     const promptTokenEstimate = Math.ceil(prompt.length / 4);
     console.log(`Chunk ${c+1} prompt size: ~${promptTokenEstimate} tokens`);
 
+    // CRITICAL DIAGNOSTIC — log the EXACT section of the prompt containing the answer
+    const answerSectionStart = prompt.indexOf(`STUDENT ${studentId} ANSWER SHEET`);
+    logger.info(`PROMPT ANSWER SECTION SENT TO GEMINI: "${prompt.substring(answerSectionStart, answerSectionStart + 300)}"`);
+
     try {
-      const maxTokens = 4000;
-      const response = await groqWithRetry(prompt, 'llama-3.3-70b-versatile', 3, maxTokens, 0);
+      const response = await callGeminiSafe(prompt, {
+        context: `mark-student-${studentId}`,
+        temperature: 0
+      });
       const text = extractJSON(response.text || '', 'object');
       const parsedResult = JSON.parse(text);
 
@@ -691,8 +704,8 @@ JSON Structure:
         overallFeedbackStatements.push(parsedResult.overallFeedback);
       }
     } catch (error: any) {
-      logger.error(`Groq marking failed for student ${studentId} (Chunk ${c + 1}/${numChunks}):`, error);
-      throw new Error(`Groq marking failed (Chunk ${c + 1}/${numChunks}): ` + (error.status ? error.status + ' ' : '') + (error.message || 'Unknown'));
+      logger.error(`Gemini marking failed for student ${studentId} (Chunk ${c + 1}/${numChunks}):`, error);
+      throw new Error(`Gemini marking failed (Chunk ${c + 1}/${numChunks}): ` + (error.status ? error.status + ' ' : '') + (error.message || 'Unknown'));
     }
   }
 
@@ -763,10 +776,19 @@ JSON Structure:
   }
 
   logger.info(
-    `Groq marked student ${studentId} in ${numChunks} chunks: ` +
+    `Gemini marked student ${studentId} in ${numChunks} chunks: ` +
     `${result.totalMarks}/${result.maxMarks} ` +
     `(${result.percentage}%) Grade: ${result.grade}`
   );
+
+  const inputHadContent = studentAnswerText && studentAnswerText.trim().length > 20;
+  const allQuestionsUnanswered = result.questions?.every(
+    (q: any) => q.status === 'INCORRECT' && /no answer/i.test(q.aiFeedback || '')
+  );
+
+  if (inputHadContent && allQuestionsUnanswered) {
+    logger.error(`🚨 MISMATCH for ${studentId}: input had ${studentAnswerText.length} chars of text but Gemini marked ALL questions as unanswered. This indicates the answer text was not properly delivered to the model — check the prompt logs above.`);
+  }
 
   return validateMarkingResult(result);
 }
@@ -1457,7 +1479,7 @@ Q[number]:
       const data = await (prisma as any).markingSession.findMany({
         where, skip, take: Number(limit),
         orderBy: { [field]: order as any },
-        include: { _count: { select: { results: true } } }
+        include: { _count: { select: { results: true, answerSheets: true } } }
       });
       const total = await (prisma as any).markingSession.count({ where });
 
@@ -1984,6 +2006,13 @@ Q[number]:
               completed++;
               return;
             }
+
+            logger.info(`═══ PRE-MARKING CHECK for ${sheet.studentId} ═══`);
+            logger.info(`studentAnswerText variable: length=${studentAnswerText?.length || 0}`);
+            logger.info(`studentAnswerText preview: "${(studentAnswerText || '').substring(0, 200)}"`);
+            logger.info(`Using locked questions: ${parsedQuestions?.length || 0} found`);
+            logger.info(`Using locked mark scheme: ${parsedMarkScheme?.length || 0} found`);
+            logger.info(`═══════════════════════════════════`);
 
             // Step 3: Gemini marks this student
             // Passes full question paper, full mark scheme,

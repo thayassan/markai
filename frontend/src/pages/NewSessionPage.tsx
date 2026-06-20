@@ -1496,9 +1496,9 @@ const NewSessionPage = () => {
             animate={{ opacity: 1 }}
             className="fixed inset-0 z-[100] bg-navy/95 flex items-center justify-center p-8 backdrop-blur-md"
           >
-            <div className="max-w-lg w-full text-center space-y-12">
+            <div className="max-w-md w-full text-center space-y-8">
               <div className="relative inline-block scale-125">
-                 <div className="w-24 h-24 border-4 border-accent/20 rounded-full flex items-center justify-center">
+                 <div className="w-24 h-24 border-4 border-accent/20 rounded-full flex items-center justify-center mx-auto">
                     <div className="w-16 h-16 border-4 border-t-accent border-r-accent/30 border-b-accent/10 border-l-accent/50 rounded-full animate-spin" />
                  </div>
                  <div className="absolute inset-0 flex items-center justify-center">
@@ -1506,12 +1506,12 @@ const NewSessionPage = () => {
                  </div>
               </div>
 
-              <div className="space-y-4">
+              <div className="space-y-2">
                 <h1 className="text-3xl font-serif font-bold text-white tracking-tight">AI is marking papers...</h1>
                 <p className="text-white/50 text-sm max-w-xs mx-auto">Evaluating student submissions against your mark scheme using advanced AI evaluation logic.</p>
               </div>
 
-              <div className="bg-white/5 rounded-3xl p-8 border border-white/10 space-y-6">
+              <div className="bg-white/5 rounded-3xl p-6 border border-white/10 space-y-6">
                 <div className="flex justify-between items-end mb-2">
                   <div className="text-left">
                     <p className="text-[10px] font-bold text-white/40 uppercase tracking-widest">Marking Progress</p>
@@ -1543,15 +1543,24 @@ const NewSessionPage = () => {
                 )}
               </div>
 
-              <div className="space-y-4 pt-12">
-                <div className="flex items-center justify-center gap-3 text-white/30 text-xs">
-                  <Loader2 size={16} className="animate-spin" />
-                  <span className="uppercase tracking-[0.2em] font-medium">Please do not navigate away</span>
-                </div>
-                <div className="flex justify-center gap-2">
-                  <div className="w-1 h-1 bg-white/20 rounded-full animate-bounce [animation-delay:-0.3s]" />
-                  <div className="w-1 h-1 bg-white/20 rounded-full animate-bounce [animation-delay:-0.15s]" />
-                  <div className="w-1 h-1 bg-white/20 rounded-full animate-bounce" />
+              <div className="space-y-6">
+                <p className="text-white/40 text-xs leading-relaxed max-w-xs mx-auto">
+                  Marking continues in the background even if you leave this page — come back anytime from Sessions to check progress.
+                </p>
+
+                <div className="flex gap-3 justify-center font-bold">
+                  <button
+                    onClick={() => navigate('/lecturer/sessions/new')}
+                    className="px-5 py-2.5 bg-white/10 hover:bg-white/20 text-white text-xs font-bold rounded-xl transition-all"
+                  >
+                    Start Another Session
+                  </button>
+                  <button
+                    onClick={() => navigate('/lecturer/dashboard')}
+                    className="px-5 py-2.5 bg-accent hover:bg-accent/90 text-navy font-bold text-xs rounded-xl transition-all shadow-lg shadow-accent/20"
+                  >
+                    Go to Dashboard
+                  </button>
                 </div>
               </div>
             </div>
