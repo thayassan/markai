@@ -180,6 +180,12 @@ const NewSessionPage = () => {
     status: 'PENDING'
   });
   const [sessionId, setSessionId] = useState('');
+  const [isParsingPaper, setIsParsingPaper] = useState(false);
+  const [paperStructure, setPaperStructure] = useState<{
+    totalMaxMarks: number | null;
+    questionCount: number;
+    mismatchWarning: string | null;
+  } | null>(null);
 
   // Errors
   const [errors, setErrors] = useState<Record<string, string>>({});
@@ -394,39 +400,41 @@ const NewSessionPage = () => {
     }, 3000);
   };
 
-  const handleStartMarking = async () => {
-    setIsMarking(true);
-
+  const createAndParseSession = async () => {
+    setIsParsingPaper(true);
     try {
-      // 1. Create session
-      const payload = {
-        ...sessionDetails,
-        paperType: sessionDetails.paperType,
-        questionPdfUrl: questionPaper.fileUrl || '',
-        markSchemePdfUrl: markScheme.fileUrl || '',
-        questionTextUrl: questionPaper.textUrl || '',
-        markSchemeTextUrl: markScheme.textUrl || '',
-        markingStrictness,
-        feedbackDetail,
-        status: 'PENDING'
-      };
-      
-      console.log('Creating session with payload:', payload);
+      let activeSessionId = sessionId;
 
-      const sessionRes = await apiFetch('/api/sessions', {
-        method: 'POST',
-        body: JSON.stringify(payload)
-      });
-      if (!sessionRes.ok) {
-        const errData = await sessionRes.json();
-        throw new Error(errData.error || 'Failed to create session');
+      // 1. Create or retrieve session
+      if (!activeSessionId) {
+        const payload = {
+          ...sessionDetails,
+          paperType: sessionDetails.paperType,
+          questionPdfUrl: questionPaper.fileUrl || '',
+          markSchemePdfUrl: markScheme.fileUrl || '',
+          questionTextUrl: questionPaper.textUrl || '',
+          markSchemeTextUrl: markScheme.textUrl || '',
+          markingStrictness,
+          feedbackDetail,
+          status: 'PENDING'
+        };
+
+        const sessionRes = await apiFetch('/api/sessions', {
+          method: 'POST',
+          body: JSON.stringify(payload)
+        });
+        if (!sessionRes.ok) {
+          const errData = await sessionRes.json();
+          throw new Error(errData.error || 'Failed to create session');
+        }
+        const session = await sessionRes.json();
+        activeSessionId = session.id;
+        setSessionId(session.id);
       }
-      const session = await sessionRes.json();
-      setSessionId(session.id);
 
-      // 2. Save all answer sheets
+      // 2. Save all answer sheets metadata
       const uploadedSheets = studentSheets.filter(s => s.uploaded);
-      const sheetsRes = await apiFetch(`/api/sessions/${session.id}/answer-sheets`, {
+      const sheetsRes = await apiFetch(`/api/sessions/${activeSessionId}/answer-sheets`, {
         method: 'POST',
         body: JSON.stringify({
           students: uploadedSheets.map(s => ({
@@ -440,8 +448,40 @@ const NewSessionPage = () => {
       });
       if (!sheetsRes.ok) throw new Error('Failed to upload answer sheets metadata');
 
-      // 3. Start marking
-      const markRes = await apiFetch(`/api/sessions/${session.id}/mark`, {
+      // 3. Parse paper structure and lock it
+      const parseRes = await apiFetch(`/api/sessions/${activeSessionId}/parse-paper`, {
+        method: 'POST'
+      });
+      if (!parseRes.ok) {
+        const errData = await parseRes.json();
+        throw new Error(errData.error || 'Failed to parse question paper structure');
+      }
+      const parseData = await parseRes.json();
+
+      setPaperStructure({
+        totalMaxMarks: parseData.totalMaxMarks,
+        questionCount: parseData.questions?.length || 0,
+        mismatchWarning: parseData.mismatchWarning || null
+      });
+
+      setCurrentStep(4);
+    } catch (error: any) {
+      alert(error.message || 'Error parsing paper structure. Please try again.');
+    } finally {
+      setIsParsingPaper(false);
+    }
+  };
+
+  const handleStartMarking = async () => {
+    setIsMarking(true);
+
+    try {
+      if (!sessionId) {
+        throw new Error('Session ID is missing. Please go back and try again.');
+      }
+
+      // Start marking
+      const markRes = await apiFetch(`/api/sessions/${sessionId}/mark`, {
         method: 'POST',
         body: JSON.stringify({
           questionPdfText: questionPaper.extractedText,
@@ -459,8 +499,8 @@ const NewSessionPage = () => {
         throw new Error(errMsg);
       }
 
-      // 4. Start polling progress
-      startProgressPolling(session.id);
+      // Start polling progress
+      startProgressPolling(sessionId);
 
     } catch (error: any) {
       setIsMarking(false);
@@ -1180,11 +1220,21 @@ const NewSessionPage = () => {
                         const hasEmptyId = studentSheets.some(s => s.uploaded && !s.studentId);
                         if (hasEmptyId) return alert('Please assign Student IDs to all uploaded sheets');
 
-                        setCurrentStep(4);
+                        createAndParseSession();
                       }}
-                      className="btn-primary"
+                      disabled={isParsingPaper}
+                      className="btn-primary flex items-center gap-2"
                     >
-                      Confirm & Start
+                      {isParsingPaper ? (
+                        <>
+                          <Loader2 size={16} className="animate-spin" />
+                          Parsing Paper Structure...
+                        </>
+                      ) : (
+                        <>
+                          Confirm & Start <ArrowRight size={18} />
+                        </>
+                      )}
                     </button>
                   </div>
                 </div>
@@ -1228,6 +1278,24 @@ const NewSessionPage = () => {
                       </div>
                     ))}
                   </div>
+
+                  {paperStructure && (
+                    <div className="p-3 bg-slate-50 border border-slate-200 rounded-lg mt-4">
+                      <p className="text-xs font-semibold text-navy mb-1">Paper Structure (locked)</p>
+                      <p className="text-sm text-slate-600">
+                        {paperStructure.questionCount} questions found · Total: {paperStructure.totalMaxMarks} marks
+                      </p>
+                      {paperStructure.mismatchWarning && (
+                        <p className="text-xs text-amber-600 mt-2 flex items-start gap-1.5 font-bold">
+                          <AlertTriangle size={13} className="shrink-0 mt-0.5" />
+                          {paperStructure.mismatchWarning}
+                        </p>
+                      )}
+                      <p className="text-[11px] text-slate-400 mt-2">
+                        This total is locked once confirmed — all students in this session will be marked out of {paperStructure.totalMaxMarks}, every time.
+                      </p>
+                    </div>
+                  )}
                 </div>
 
                 <div className="card overflow-hidden">

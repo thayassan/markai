@@ -234,7 +234,12 @@ class GeminiKeyPool {
     return null; // every key is currently exhausted
   }
 
-  async call(contents: any, context: string = 'unknown', maxWaitMs: number = 90000): Promise<any> {
+  async call(
+    contents: any,
+    context: string = 'unknown',
+    options: { maxWaitMs?: number; temperature?: number } = {}
+  ): Promise<any> {
+    const { maxWaitMs = 90000, temperature } = options;
     const startTime = Date.now();
     let hasWaited = false;
 
@@ -265,7 +270,8 @@ class GeminiKeyPool {
 
           const response = await keyState.client.models.generateContent({
             model: 'gemini-2.5-flash-lite',
-            contents
+            contents,
+            config: temperature !== undefined ? { temperature } : undefined
           });
 
           return response;
@@ -329,10 +335,10 @@ function getFileHash(buffer: Buffer): string {
 // ─── Queue + Retry wrapper for ALL Gemini calls ─────────────────────────────
 async function callGeminiSafe(
   contents: any,
-  options: { context?: string } = {}
+  options: { context?: string; temperature?: number } = {}
 ): Promise<any> {
-  const { context = 'unknown' } = options;
-  return geminiPool.call(contents, context);
+  const { context = 'unknown', temperature } = options;
+  return geminiPool.call(contents, context, { temperature });
 }
 
 // ─── Gemini Model Startup Verification ──────────────────────────────────────
@@ -373,7 +379,8 @@ async function groqWithRetry(
   prompt: string,
   model = 'llama-3.3-70b-versatile',
   maxRetries = 3,
-  maxTokens?: number
+  maxTokens?: number,
+  temperature?: number
 ): Promise<any> {
   // Try up to length of pool + original maxRetries
   const maxAttempts = Math.max(maxRetries, groqClients.length + 1);
@@ -386,7 +393,8 @@ async function groqWithRetry(
       const completion = await currentGroq.chat.completions.create({
         model,
         messages: [{ role: 'user', content: prompt }],
-        ...(maxTokens ? { max_tokens: maxTokens } : {})
+        ...(maxTokens ? { max_tokens: maxTokens } : {}),
+        ...(temperature !== undefined ? { temperature } : {})
       });
 
       // Track usage
@@ -511,7 +519,7 @@ Rules:
 8. Include every mark scheme entry`;
 
   try {
-    const response = await groqWithRetry(prompt);
+    const response = await groqWithRetry(prompt, 'llama-3.3-70b-versatile', 3, undefined, 0);
 
     const text = extractJSON(response.text || '{}', 'object');
     const parsed = JSON.parse(text);
@@ -672,7 +680,7 @@ JSON Structure:
 
     try {
       const maxTokens = 4000;
-      const response = await groqWithRetry(prompt, 'llama-3.3-70b-versatile', 3, maxTokens);
+      const response = await groqWithRetry(prompt, 'llama-3.3-70b-versatile', 3, maxTokens, 0);
       const text = extractJSON(response.text || '', 'object');
       const parsedResult = JSON.parse(text);
 
@@ -710,17 +718,39 @@ JSON Structure:
     grade: 'F'
   };
 
-  // Recalculate safely in code
-  if (result.questions.length > 0) {
+  // Force per-question max marks and structure to match the locked questions exactly
+  if (parsedQuestions && parsedQuestions.length > 0) {
+    result.questions = parsedQuestions.map((pq: any) => {
+      const markedQ = mergedQuestions.find(
+        (q: any) => String(q.questionNumber) === String(pq.questionNumber)
+      );
+
+      const marksAvailable = Number(pq.marksAvailable) || 0;
+      const marksAwarded = markedQ 
+        ? Math.min(Number(markedQ.marksAwarded) || 0, marksAvailable) 
+        : 0;
+
+      return {
+        questionNumber: pq.questionNumber,
+        questionText: pq.questionText || '',
+        topic: pq.topic || 'General',
+        marksAvailable,
+        marksAwarded,
+        status: marksAwarded === marksAvailable ? 'CORRECT' : marksAwarded > 0 ? 'PARTIAL' : 'INCORRECT',
+        studentAnswer: markedQ?.studentAnswer || '[NO ANSWER]',
+        expectedAnswer: markedQ?.expectedAnswer || '',
+        aiFeedback: markedQ?.aiFeedback || (markedQ ? '' : 'No answer detected in student answer sheet.'),
+        lostMarksReason: markedQ?.lostMarksReason || (markedQ ? null : 'Unanswered'),
+        improvementSuggestion: markedQ?.improvementSuggestion || ''
+      };
+    });
+
     const recalcTotal = result.questions.reduce((sum: number, q: any) => sum + (Number(q.marksAwarded) || 0), 0);
     const recalcMax = result.questions.reduce((sum: number, q: any) => sum + (Number(q.marksAvailable) || 0), 0);
 
     result.totalMarks = recalcTotal;
-
-    if (recalcMax > 0) {
-      result.maxMarks = recalcMax;
-      result.percentage = Math.round((recalcTotal / recalcMax) * 1000) / 10;
-    }
+    result.maxMarks = recalcMax; // this will now ALWAYS equal session.totalMaxMarks
+    result.percentage = recalcMax > 0 ? Math.round((recalcTotal / recalcMax) * 1000) / 10 : 0;
 
     const pct = result.percentage;
     result.grade =
@@ -1525,6 +1555,82 @@ Q[number]:
     }
   });
 
+  app.post('/api/sessions/:id/parse-paper', authMiddleware, requireLecturer, async (req, res) => {
+    try {
+      const { id } = req.params;
+      const session = await (prisma as any).markingSession.findUnique({ where: { id } });
+
+      if (!session) {
+        return res.status(404).json({ error: 'Session not found' });
+      }
+
+      // If already parsed and locked, return the existing structure — never re-parse silently
+      if (session.parsedQuestions && session.parsedMarkScheme) {
+        return res.json({
+          questions: session.parsedQuestions,
+          markScheme: session.parsedMarkScheme,
+          totalMaxMarks: session.totalMaxMarks,
+          alreadyParsed: true
+        });
+      }
+
+      const questionPdfText = session.questionTextUrl
+        ? await downloadTextFromSupabase(session.questionTextUrl)
+        : '';
+      const markSchemeText = session.markSchemeTextUrl
+        ? await downloadTextFromSupabase(session.markSchemeTextUrl)
+        : '';
+
+      if (!questionPdfText || !markSchemeText) {
+        return res.status(400).json({ error: 'Question paper or mark scheme text missing.' });
+      }
+
+      const { questions: parsedQuestions, markScheme: parsedMarkScheme } = 
+        await parseQuestionPaperAndMarkScheme(questionPdfText, markSchemeText);
+
+      if (!parsedQuestions || parsedQuestions.length === 0) {
+        return res.status(400).json({ error: 'Failed to extract any questions from the question paper.' });
+      }
+
+      const totalMaxMarks = parsedQuestions.reduce(
+        (sum: number, q: any) => sum + (Number(q.marksAvailable) || 0), 0
+      );
+
+      // VALIDATION — try to find a stated total in the raw text and compare
+      const statedTotalMatch = questionPdfText.match(/total[:\s]*(\d+)\s*marks?/i) ||
+                                questionPdfText.match(/\/(\d+)\s*$/m);
+      const statedTotal = statedTotalMatch ? parseInt(statedTotalMatch[1], 10) : null;
+      const mismatchWarning = statedTotal && statedTotal !== totalMaxMarks
+        ? `Warning: extracted total (${totalMaxMarks}) does not match stated total (${statedTotal}) in the document. Please review before proceeding.`
+        : null;
+
+      // LOCK the structure permanently on this session
+      await (prisma as any).markingSession.update({
+        where: { id },
+        data: {
+          parsedQuestions,
+          parsedMarkScheme,
+          totalMaxMarks,
+          parsingVerified: false
+        }
+      });
+
+      logger.info(`Session ${id} paper parsed and LOCKED. Total marks: ${totalMaxMarks}${mismatchWarning ? ' — MISMATCH DETECTED' : ''}`);
+
+      res.json({
+        questions: parsedQuestions,
+        markScheme: parsedMarkScheme,
+        totalMaxMarks,
+        mismatchWarning,
+        alreadyParsed: false
+      });
+
+    } catch (error: any) {
+      logger.error('Parse paper error:', error);
+      res.status(500).json({ error: error.message });
+    }
+  });
+
   app.get('/api/sessions/:id/answer-sheets', authMiddleware, async (req, res) => {
     try {
       const sheets = await (prisma as any).studentAnswerSheet.findMany({ where: { sessionId: req.params.id } });
@@ -1728,18 +1834,27 @@ Q[number]:
         console.log('✅ Mark scheme extracted:', markSchemeText?.length, 'chars');
 
         // ───────────────────────────────────────────────
-        // PRE-PROCESS ONCE FOR ALL STUDENTS
-        // Parse question paper and mark scheme using Gemini
-        // These results are reused for every student
+        // USE THE LOCKED STRUCTURE — never re-parse here.
+        // Parsing must have already happened via /parse-paper
+        // before marking starts.
         // ───────────────────────────────────────────────
+        if (!session.parsedQuestions || !session.parsedMarkScheme) {
+          logger.error(`Session ${id} has no locked question structure. Marking cannot proceed.`);
+          await (prisma as any).markingSession.update({
+            where: { id },
+            data: { status: 'ERROR' }
+          });
+          markingProgress.set(id, {
+            total: 0, completed: 0, currentStudentId: '', currentStudentName: '',
+            status: 'ERROR', estimatedSecondsRemaining: 0
+          });
+          return;
+        }
 
-        console.log('🧠 Skipping Groq pre-processing passes for Question Paper and Mark Scheme...');
-        // Step 1: Gemini reads and understands question paper (SKIPPED)
-        const parsedQuestions: any[] = [];
-        
-        console.log('🧠 Skipping Mark Scheme extraction pass...');
-        // Step 2: Gemini reads and understands mark scheme (SKIPPED)
-        const parsedMarkScheme: any[] = [];
+        const parsedQuestions = session.parsedQuestions as any[];
+        const parsedMarkScheme = session.parsedMarkScheme as any[];
+
+        logger.info(`Using LOCKED structure for session ${id}: ${parsedQuestions.length} questions, ${session.totalMaxMarks} total marks`);
 
         // ───────────────────────────────────────────────
         // MARK EACH STUDENT
@@ -2071,11 +2186,16 @@ Q[number]:
         return res.status(404).json({ error: 'Session or Answer Sheet not found' });
       }
 
-      // Fetch texts
-      const questionPdfText = await downloadTextFromSupabase(session.questionTextUrl || '');
-      const markSchemeText = await downloadTextFromSupabase(session.markSchemeTextUrl || '');
-      
-      const { questions: parsedQuestions, markScheme: parsedMarkScheme } = await parseQuestionPaperAndMarkScheme(questionPdfText, markSchemeText);
+      if (!session.parsedQuestions || !session.parsedMarkScheme) {
+        return res.status(400).json({ error: 'Session has no locked question structure. Please parse the paper first.' });
+      }
+
+      const parsedQuestions = session.parsedQuestions as any[];
+      const parsedMarkScheme = session.parsedMarkScheme as any[];
+
+      // Fetch texts fallbacks for prompt context
+      const questionPdfText = session.questionTextUrl ? await downloadTextFromSupabase(session.questionTextUrl) : '';
+      const markSchemeText = session.markSchemeTextUrl ? await downloadTextFromSupabase(session.markSchemeTextUrl) : '';
 
       // Re-mark logic
       const resultData = await markStudentAnswers(

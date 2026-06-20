@@ -89,12 +89,16 @@ model MarkingSession {
   paperType         String               @default("Theory")
   questionPdfUrl    String
   markSchemePdfUrl  String
-  questionTextUrl   String?
-  markSchemeTextUrl String?
-  markingStrictness String               @default("Standard")
-  feedbackDetail    String               @default("Detailed")
-  status            String               @default("PENDING")
-  createdAt         DateTime             @default(now())
+  questionTextUrl     String?
+  markSchemeTextUrl   String?
+  parsedQuestions     Json?
+  parsedMarkScheme    Json?
+  totalMaxMarks       Int?
+  parsingVerified     Boolean              @default(false)
+  markingStrictness   String               @default("Standard")
+  feedbackDetail      String               @default("Detailed")
+  status              String               @default("PENDING")
+  createdAt           DateTime             @default(now())
 
   class        Class?               @relation(fields: [classId], references: [id])
   lecturer     User                 @relation(fields: [lecturerId], references: [id], onDelete: Cascade)
