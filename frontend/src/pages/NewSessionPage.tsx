@@ -155,6 +155,7 @@ const NewSessionPage = () => {
     studentName: string;
     file: File | null;
     fileUrl: string;
+    textUrl?: string;
     extractedText: string;
     extractMethod: string;
     uploading: boolean;
@@ -195,7 +196,7 @@ const NewSessionPage = () => {
   useEffect(() => {
     if (studentSheets.length === 0) {
       setStudentSheets([{
-        studentId: '', studentName: '', file: null, fileUrl: '',
+        studentId: '', studentName: '', file: null, fileUrl: '', textUrl: '',
         extractedText: '', extractMethod: 'pdf-parse',
         uploading: false, uploaded: false, previewOpen: false
       }]);
@@ -333,6 +334,7 @@ const NewSessionPage = () => {
         ...s,
         file: file,
         fileUrl: result.fileUrl,
+        textUrl: result.textUrl,
         extractedText: result.text,
         extractMethod: result.method,
         fileType: result.fileType,
@@ -434,17 +436,36 @@ const NewSessionPage = () => {
 
       // 2. Save all answer sheets metadata
       const uploadedSheets = studentSheets.filter(s => s.uploaded);
+
+      // DIAGNOSTIC — log exactly what's about to be sent
+      console.log('═══ PRE-SUBMIT ANSWER SHEET DATA ═══');
+      uploadedSheets.forEach(s => {
+        console.log(`Student ${s.studentId}:`, {
+          hasExtractedText: !!s.extractedText,
+          textLength: s.extractedText?.length || 0,
+          textPreview: s.extractedText?.substring(0, 100) || '(EMPTY)',
+          fileUrl: s.fileUrl,
+          extractMethod: s.extractMethod
+        });
+      });
+      console.log('═══════════════════════════════════');
+
+      const payload = {
+        students: uploadedSheets.map(s => ({
+          studentId: s.studentId,
+          studentName: s.studentName,
+          extractedText: s.extractedText,
+          pdfUrl: s.fileUrl,
+          textUrl: s.textUrl,
+          extractMethod: s.extractMethod
+        }))
+      };
+
+      console.log('Payload being sent:', JSON.stringify(payload, null, 2));
+
       const sheetsRes = await apiFetch(`/api/sessions/${activeSessionId}/answer-sheets`, {
         method: 'POST',
-        body: JSON.stringify({
-          students: uploadedSheets.map(s => ({
-            studentId: s.studentId,
-            studentName: s.studentName,
-            extractedText: s.extractedText,
-            pdfUrl: s.fileUrl,
-            extractMethod: s.extractMethod
-          }))
-        })
+        body: JSON.stringify(payload)
       });
       if (!sheetsRes.ok) throw new Error('Failed to upload answer sheets metadata');
 
@@ -674,6 +695,10 @@ const NewSessionPage = () => {
   };
 
   // --- Rendering ---
+
+  const hasEmptyAnswers = studentSheets
+    .filter(s => s.uploaded)
+    .some(s => !s.extractedText || s.extractedText.trim().length < 5);
 
   return (
     <DashboardLayout>
@@ -1072,7 +1097,7 @@ const NewSessionPage = () => {
                   <div className="p-4 bg-bg/30 border-t border-border">
                     <button 
                       onClick={() => setStudentSheets(prev => [...prev, {
-                        studentId: '', studentName: '', file: null, fileUrl: '',
+                        studentId: '', studentName: '', file: null, fileUrl: '', textUrl: '',
                         extractedText: '', extractMethod: 'pdf-parse',
                         uploading: false, uploaded: false, previewOpen: false
                       }])}
@@ -1310,6 +1335,7 @@ const NewSessionPage = () => {
                           <th className="px-4 py-2 font-bold text-text-muted">Student ID</th>
                           <th className="px-4 py-2 font-bold text-text-muted">File</th>
                           <th className="px-4 py-2 font-bold text-text-muted">Method</th>
+                          <th className="px-4 py-2 font-bold text-text-muted">Extracted Text</th>
                         </tr>
                       </thead>
                       <tbody>
@@ -1324,6 +1350,17 @@ const NewSessionPage = () => {
                               )}>
                                 {s.extractMethod === 'gemini-vision' ? 'AI OCR' : 'Text'}
                               </span>
+                            </td>
+                            <td className="px-4 py-2 font-semibold">
+                              {s.extractedText && s.extractedText.trim().length >= 5 ? (
+                                <span className="text-green-600">
+                                  ✓ {s.extractedText.length} chars
+                                </span>
+                              ) : (
+                                <span className="text-red-600 font-semibold">
+                                  ⚠ EMPTY — will be marked as unanswered
+                                </span>
+                              )}
                             </td>
                           </tr>
                         ))}
@@ -1424,12 +1461,21 @@ const NewSessionPage = () => {
                   <button onClick={() => setCurrentStep(3)} className="btn-ghost flex-1">Back</button>
                   <button 
                     onClick={handleStartMarking}
-                    className="btn-accent flex-1 flex items-center justify-center gap-2 shadow-lg shadow-accent/20 group hover:scale-[1.02] transition-all"
+                    disabled={hasEmptyAnswers}
+                    className={cn(
+                      "btn-accent flex-1 flex items-center justify-center gap-2 shadow-lg shadow-accent/20 group transition-all",
+                      hasEmptyAnswers ? "opacity-50 cursor-not-allowed" : "hover:scale-[1.02]"
+                    )}
                   >
                     <Zap size={20} fill="currentColor" className="group-hover:animate-pulse" /> 
                     <span className="font-bold">Save & Start Marking</span>
                   </button>
                 </div>
+                {hasEmptyAnswers && (
+                  <p className="text-xs text-red-600 mt-2 text-center font-bold">
+                    Some students have no extracted text. Please go back and re-upload their answer sheets before starting.
+                  </p>
+                )}
                 <button 
                   onClick={() => {/* Save Draft logic same but without mark endopoint */}}
                   className="w-full text-[10px] font-bold text-text-muted uppercase tracking-widest hover:text-navy transition-colors text-center"

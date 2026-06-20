@@ -1491,41 +1491,65 @@ Q[number]:
   });
 
   app.post('/api/sessions/:id/answer-sheets', authMiddleware, requireLecturer, async (req, res) => {
-    const { id } = req.params;
-    const { students } = req.body;
-
-    logger.info(`Uploading metadata for ${students?.length || 0} answer sheets in session ${id}`);
-
-    if (!students || !Array.isArray(students)) {
-      return res.status(400).json({ error: 'Invalid students data. Expected an array.' });
-    }
-
-    if (students.length === 0) {
-      return res.status(400).json({ error: 'No student answer sheets provided.' });
-    }
-
     try {
-      // Use a transaction for atomic insertion
-      const sheets = await (prisma as any).$transaction(
-        students.map((s: any) => (prisma as any).studentAnswerSheet.create({
-          data: {
-            sessionId: id,
-            // Ensure studentId is unique or generated
-            studentId: s.studentId && s.studentId.trim() !== '' 
-              ? s.studentId 
-              : `TEMP_${Math.random().toString(36).substr(2, 9)}`,
-            studentName: s.studentName || s.studentId || s.filename || 'Unknown Student',
-            extractedText: s.extractedText || '',
-            pdfUrl: s.pdfUrl || '',
-            extractMethod: s.extractMethod || 'AI'
-          }
-        }))
+      const { id } = req.params;
+      const { students } = req.body;
+
+      if (!Array.isArray(students) || students.length === 0) {
+        return res.status(400).json({ error: 'No student answer sheets provided' });
+      }
+
+      // DIAGNOSTIC — log exactly what the backend received
+      logger.info(`Received ${students.length} answer sheets for session ${id}`);
+      students.forEach((s: any) => {
+        logger.info(`Student ${s.studentId}: extractedText length = ${(s.extractedText || '').length}, preview = "${(s.extractedText || '').substring(0, 80)}"`);
+      });
+
+      // VALIDATION — reject the whole request if any student has empty text,
+      // instead of silently saving blank answer sheets that will later show
+      // "no answer detected" for every question
+      const emptyTextStudents = students.filter(
+        (s: any) => !s.extractedText || s.extractedText.trim().length < 5
       );
 
-      logger.info(`Successfully saved ${sheets.length} answer sheets for session ${id}`);
-      res.json(sheets);
+      if (emptyTextStudents.length > 0) {
+        const ids = emptyTextStudents.map((s: any) => s.studentId).join(', ');
+        logger.error(`Rejecting save — empty extractedText for students: ${ids}`);
+        return res.status(400).json({
+          error: `These students have no extracted text and would be marked as unanswered: ${ids}. Please re-upload their answer sheets.`,
+          emptyStudentIds: emptyTextStudents.map((s: any) => s.studentId)
+        });
+      }
+
+      const created = await (prisma as any).studentAnswerSheet.createMany({
+        data: students.map((s: any) => ({
+          sessionId: id,
+          studentId: s.studentId && s.studentId.trim() !== '' 
+            ? s.studentId 
+            : `TEMP_${Math.random().toString(36).substr(2, 9)}`,
+          studentName: s.studentName || s.studentId || 'Unknown Student',
+          pdfUrl: s.pdfUrl || '',
+          textUrl: s.textUrl || null,
+          extractedText: s.extractedText,
+          extractMethod: s.extractMethod || 'unknown',
+          status: 'PENDING'
+        })),
+        skipDuplicates: true
+      });
+
+      // VERIFY what actually landed in the database immediately after saving
+      const saved = await (prisma as any).studentAnswerSheet.findMany({
+        where: { sessionId: id },
+        select: { studentId: true, extractedText: true }
+      });
+      saved.forEach(s => {
+        logger.info(`VERIFIED in DB — ${s.studentId}: extractedText length = ${s.extractedText?.length || 0}`);
+      });
+
+      res.json({ saved: created.count, students: saved });
+
     } catch (error: any) {
-      logger.error(`Failed to save answer sheets for session ${id}:`, error);
+      logger.error('Save answer sheets error:', error);
       
       // Handle the case where the table doesn't exist (P2021)
       if (error.code === 'P2021') {
@@ -1891,19 +1915,22 @@ Q[number]:
             // Get student answer text
             let studentAnswerText = sheet.extractedText;
 
+            logger.info(`Student ${sheet.studentId} — extractedText from DB: length=${studentAnswerText?.length || 0}, preview="${(studentAnswerText || '').substring(0, 80)}"`);
+
             // Try Supabase Storage text file if text not in DB
             if (
               (!studentAnswerText || studentAnswerText.trim().length < 5) &&
               (sheet as any).textUrl
             ) {
+              logger.warn(`Student ${sheet.studentId} — extractedText empty in DB, attempting Supabase Storage fallback from textUrl: ${(sheet as any).textUrl}`);
               try {
                 studentAnswerText = await downloadTextFromSupabase(
                   (sheet as any).textUrl
                 );
-                logger.info(`Loaded answer text for ${sheet.studentId} from Supabase Storage (${studentAnswerText.length} chars)`);
-              } catch (e) {
+                logger.info(`Student ${sheet.studentId} — fallback download succeeded: length=${studentAnswerText?.length || 0}`);
+              } catch (e: any) {
                 logger.error(
-                  `Cannot load answer text for ${sheet.studentId}:`, e
+                  `Student ${sheet.studentId} — fallback download FAILED:`, e.message
                 );
               }
             }
@@ -1949,10 +1976,10 @@ Q[number]:
 
             // Skip student if still no answer text after all attempts
             if (!studentAnswerText || studentAnswerText.trim().length < 5) {
-              logger.warn(`Skipping ${sheet.studentId} — no answer text after all extraction attempts`);
+              logger.error(`Student ${sheet.studentId} — NO ANSWER TEXT AVAILABLE from either DB or storage. Skipping.`);
               await (prisma as any).studentAnswerSheet.update({
                 where: { id: sheet.id },
-                data: { status: 'SKIPPED' }
+                data: { status: 'SKIPPED', errorMessage: 'No extracted text was available at marking time' }
               });
               completed++;
               return;
