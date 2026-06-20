@@ -187,6 +187,8 @@ const NewSessionPage = () => {
     questionCount: number;
     mismatchWarning: string | null;
   } | null>(null);
+  const [needsManualMarks, setNeedsManualMarks] = useState(false);
+  const [manualQuestions, setManualQuestions] = useState<any[]>([]);
 
   // Errors
   const [errors, setErrors] = useState<Record<string, string>>({});
@@ -470,14 +472,21 @@ const NewSessionPage = () => {
       if (!sheetsRes.ok) throw new Error('Failed to upload answer sheets metadata');
 
       // 3. Parse paper structure and lock it
+      setNeedsManualMarks(false);
       const parseRes = await apiFetch(`/api/sessions/${activeSessionId}/parse-paper`, {
         method: 'POST'
       });
-      if (!parseRes.ok) {
-        const errData = await parseRes.json();
-        throw new Error(errData.error || 'Failed to parse question paper structure');
-      }
       const parseData = await parseRes.json();
+
+      if (!parseRes.ok) {
+        if (parseData.needsManualMarks) {
+          setNeedsManualMarks(true);
+          setManualQuestions(parseData.questions.map((q: any) => ({ ...q, marksAvailable: 1 })));
+          setCurrentStep(4);
+          return;
+        }
+        throw new Error(parseData.error || 'Failed to parse question paper structure');
+      }
 
       setPaperStructure({
         totalMaxMarks: parseData.totalMaxMarks,
@@ -1279,6 +1288,79 @@ const NewSessionPage = () => {
             >
               {/* Left Column: Summary */}
               <div className="space-y-6">
+                {needsManualMarks && (
+                  <div className="p-6 bg-amber-50/80 border border-amber-200 rounded-2xl mb-4 relative overflow-hidden backdrop-blur-sm">
+                    <p className="text-sm font-semibold text-amber-800 mb-1 flex items-center gap-1.5 font-serif">
+                      <AlertTriangle size={16} className="text-amber-600" />
+                      Couldn't detect mark values automatically
+                    </p>
+                    <p className="text-xs text-amber-700/80 mb-4 leading-relaxed">
+                      Please enter the marks for each question below — this only needs to be done once and will be locked for the whole session.
+                    </p>
+
+                    <div className="max-h-60 overflow-y-auto pr-2">
+                      <table className="w-full text-xs">
+                        <thead>
+                          <tr className="text-left text-amber-800 border-b border-amber-200/50 pb-2">
+                            <th className="pb-2 font-bold uppercase tracking-wider text-[10px]">Q#</th>
+                            <th className="pb-2 font-bold uppercase tracking-wider text-[10px]">Question</th>
+                            <th className="pb-2 font-bold uppercase tracking-wider text-[10px] w-20">Marks</th>
+                          </tr>
+                        </thead>
+                        <tbody className="divide-y divide-amber-200/30">
+                          {manualQuestions.map((q, idx) => (
+                            <tr key={idx} className="hover:bg-amber-100/30 transition-colors">
+                              <td className="py-2 pr-2 font-bold text-amber-900">{q.questionNumber}</td>
+                              <td className="py-2 pr-4 text-amber-950/85 truncate max-w-[200px]" title={q.questionText}>{q.questionText}</td>
+                              <td className="py-2">
+                                <div className="relative">
+                                  <input
+                                    type="number"
+                                    min="0"
+                                    value={q.marksAvailable}
+                                    onChange={(e) => {
+                                      const updated = [...manualQuestions];
+                                      updated[idx].marksAvailable = Number(e.target.value);
+                                      setManualQuestions(updated);
+                                    }}
+                                    className="w-16 px-2 py-1 bg-white border border-amber-300 rounded text-xs font-bold text-amber-950 focus:outline-none focus:ring-2 focus:ring-amber-500"
+                                  />
+                                </div>
+                              </td>
+                            </tr>
+                          ))}
+                        </tbody>
+                      </table>
+                    </div>
+
+                    <button
+                      onClick={async () => {
+                        try {
+                          const res = await apiFetch(`/api/sessions/${sessionId}/confirm-manual-marks`, {
+                            method: 'POST',
+                            body: JSON.stringify({ questions: manualQuestions })
+                          });
+                          if (!res.ok) {
+                            throw new Error('Failed to save manual marks');
+                          }
+                          const data = await res.json();
+                          setNeedsManualMarks(false);
+                          setPaperStructure({
+                            totalMaxMarks: data.totalMaxMarks,
+                            questionCount: manualQuestions.length,
+                            mismatchWarning: null
+                          });
+                        } catch (e: any) {
+                          alert(e.message || 'Error saving marks');
+                        }
+                      }}
+                      className="mt-4 w-full py-2 bg-navy text-white text-xs font-bold rounded-xl hover:bg-navy/90 transition-all shadow-md shadow-navy/10 flex items-center justify-center gap-1.5"
+                    >
+                      <Check size={14} /> Confirm Marks & Lock Structure
+                    </button>
+                  </div>
+                )}
+
                 <div className="card p-6">
                   <h3 className="text-sm font-bold text-navy uppercase tracking-widest mb-6 pb-4 border-b border-border flex items-center gap-2">
                     <FileText size={18} className="text-accent" /> Session Summary
@@ -1461,10 +1543,10 @@ const NewSessionPage = () => {
                   <button onClick={() => setCurrentStep(3)} className="btn-ghost flex-1">Back</button>
                   <button 
                     onClick={handleStartMarking}
-                    disabled={hasEmptyAnswers}
+                    disabled={hasEmptyAnswers || needsManualMarks}
                     className={cn(
-                      "btn-accent flex-1 flex items-center justify-center gap-2 shadow-lg shadow-accent/20 group transition-all",
-                      hasEmptyAnswers ? "opacity-50 cursor-not-allowed" : "hover:scale-[1.02]"
+                       "btn-accent flex-1 flex items-center justify-center gap-2 shadow-lg shadow-accent/20 group transition-all",
+                       (hasEmptyAnswers || needsManualMarks) ? "opacity-50 cursor-not-allowed" : "hover:scale-[1.02]"
                     )}
                   >
                     <Zap size={20} fill="currentColor" className="group-hover:animate-pulse" /> 
@@ -1474,6 +1556,11 @@ const NewSessionPage = () => {
                 {hasEmptyAnswers && (
                   <p className="text-xs text-red-600 mt-2 text-center font-bold">
                     Some students have no extracted text. Please go back and re-upload their answer sheets before starting.
+                  </p>
+                )}
+                {needsManualMarks && (
+                  <p className="text-xs text-amber-600 mt-2 text-center font-bold">
+                    Marks could not be detected. Please confirm the manual marks structure above before starting.
                   </p>
                 )}
                 <button 

@@ -500,6 +500,54 @@ const validateMarkingResult = (result: any) => {
   return result;
 };
 
+function normalizeQuestionMarks(parsed: any[]): any[] {
+  return parsed.map((q: any) => {
+    // Try every reasonable field name Gemini/Llama might have used instead of marksAvailable
+    const marksValue =
+      q.marksAvailable ??
+      q.marks ??
+      q.marksAllocated ??
+      q.totalMarks ??
+      q.maxMarks ??
+      q.points ??
+      0;
+
+    const numericMarks = Number(marksValue);
+
+    return {
+      questionNumber: String(q.questionNumber || q.number || q.q || 'Unknown'),
+      questionText: q.questionText || q.question || q.text || '',
+      marksAvailable: isNaN(numericMarks) ? 0 : numericMarks,
+      topic: q.topic || q.subject || 'General'
+    };
+  });
+}
+
+function normalizeMarkScheme(parsed: any[]): any[] {
+  return parsed.map((m: any) => {
+    const marksValue =
+      m.marksAvailable ??
+      m.marks ??
+      m.marksAllocated ??
+      m.totalMarks ??
+      m.maxMarks ??
+      m.points ??
+      0;
+
+    const numericMarks = Number(marksValue);
+
+    return {
+      questionNumber: String(m.questionNumber || m.number || m.q || 'Unknown'),
+      marksAvailable: isNaN(numericMarks) ? 0 : numericMarks,
+      requiredKeywords: m.requiredKeywords || [],
+      acceptAlternatives: m.acceptAlternatives || [],
+      rejectList: m.rejectList || [],
+      methodMarks: m.methodMarks || '',
+      markingGuidance: m.markingGuidance || ''
+    };
+  });
+}
+
 // ─── Combined Question Paper + Mark Scheme Parser (saves 1 API call per session) ───
 async function parseQuestionPaperAndMarkScheme(
   questionPdfText: string,
@@ -507,15 +555,38 @@ async function parseQuestionPaperAndMarkScheme(
 ): Promise<{ questions: any[]; markScheme: any[] }> {
 
   logger.info('Parsing question paper AND mark scheme in ONE call...');
+  logger.info(`Question PDF text length: ${questionPdfText?.length || 0}, preview: "${(questionPdfText || '').substring(0, 300)}"`);
 
   const prompt = `
-You are an expert exam analyser. Read both documents below and extract structured data from each.
+You are an expert exam paper analyser. Read both documents below and extract structured data from each.
 
 QUESTION PAPER:
 ${questionPdfText}
 
 MARK SCHEME:
 ${markSchemeText}
+
+HOW TO FIND MARKS FOR EACH QUESTION:
+Marks are usually shown in one of these formats next to or after each question in the question paper or mark scheme:
+- In square brackets: [5] or [2 marks]
+- In round brackets: (5) or (5 marks)
+- After a slash: Q1 /5
+- As a trailing number: Question 1 ... 5
+- In a "Total" or "Marks" column if the paper uses a table layout
+
+Look carefully for ANY of these patterns next to each question. If a question
+truly has no visible mark indicator anywhere near it, estimate based on the
+complexity of what's being asked (a one-word answer is likely 1-2 marks, a
+short explanation is likely 3-5 marks, an essay-style answer is likely 8-15 marks)
+rather than defaulting to 0 — a real exam paper almost never has a 0-mark question.
+
+CRITICAL INSTRUCTIONS FOR ACCURACY:
+- Read the ENTIRE document before producing output
+- Sum every individual question's marks and verify it against any stated
+  total (e.g. "Total: 25 marks", "/30") found in the document
+- If you cannot find a stated total to verify against, and your per-question
+  marks would sum to a suspiciously round or suspiciously low number, double
+  check you haven't missed mark indicators
 
 Return ONLY a valid JSON object with no markdown, no backticks, no extra text:
 {
@@ -545,22 +616,39 @@ Rules:
 1. questionNumber must match exactly what is printed in the paper
 2. questionText must be the complete unmodified question
 3. Extract marks from patterns like [2] or (3 marks) or /4
-4. If marks not visible set marksAvailable to null
-5. Every question including sub-questions must be included
-6. Do not skip any question no matter how short
-7. questionNumber must match between questions and markScheme arrays
-8. Include every mark scheme entry`;
+4. Every question including sub-questions must be included
+5. Do not skip any question no matter how short
+6. questionNumber must match between questions and markScheme arrays
+7. Include every mark scheme entry`;
 
   try {
     const response = await groqWithRetry(prompt, 'llama-3.3-70b-versatile', 3, undefined, 0);
 
+    // CRITICAL DIAGNOSTIC — log the raw response BEFORE any parsing/cleaning
+    logger.info(`RAW Gemini/Llama parsing response: "${response.text?.substring(0, 1500)}"`);
+
     const text = extractJSON(response.text || '{}', 'object');
     const parsed = JSON.parse(text);
 
-    const questions = parsed.questions || [];
-    const markScheme = parsed.markScheme || [];
+    let questions = parsed.questions || [];
+    let markScheme = parsed.markScheme || [];
 
-    logger.info(`Parsed ${questions.length} questions, ${markScheme.length} mark scheme entries in ONE call`);
+    // Apply normalization
+    questions = normalizeQuestionMarks(questions);
+    markScheme = normalizeMarkScheme(markScheme);
+
+    // Log each question's extracted marks individually
+    questions.forEach((q: any, i: number) => {
+      logger.info(`Question ${i + 1} [${q.questionNumber}]: marksAvailable=${q.marksAvailable} (type: ${typeof q.marksAvailable}), all fields: ${JSON.stringify(q)}`);
+    });
+
+    const total = questions.reduce((s: number, q: any) => s + (Number(q.marksAvailable) || 0), 0);
+    logger.info(`Total extracted marks after normalization: ${total} across ${questions.length} questions`);
+
+    if (total === 0 && questions.length > 0) {
+      logger.error(`🚨 ALL ${questions.length} questions extracted with 0 marks. Either the field name doesn't match, or the source PDF text has no readable mark values.`);
+    }
+
     return { questions, markScheme };
 
   } catch (error) {
@@ -1572,6 +1660,15 @@ Q[number]:
         (sum: number, q: any) => sum + (Number(q.marksAvailable) || 0), 0
       );
 
+      if (totalMaxMarks === 0) {
+        logger.error(`Session ${id} parsed with 0 total marks across ${parsedQuestions.length} questions. Refusing to lock this structure.`);
+        return res.status(400).json({
+          error: `The AI could not detect mark values for any of the ${parsedQuestions.length} questions found. This usually means the marks aren't clearly visible as text in the uploaded PDF. Please check the question paper format, or manually enter mark values below.`,
+          questions: parsedQuestions,
+          needsManualMarks: true
+        });
+      }
+
       // VALIDATION — try to find a stated total in the raw text and compare
       const statedTotalMatch = questionPdfText.match(/total[:\s]*(\d+)\s*marks?/i) ||
                                 questionPdfText.match(/\/(\d+)\s*$/m);
@@ -1603,6 +1700,26 @@ Q[number]:
 
     } catch (error: any) {
       logger.error('Parse paper error:', error);
+      res.status(500).json({ error: error.message });
+    }
+  });
+
+  app.post('/api/sessions/:id/confirm-manual-marks', authMiddleware, async (req, res) => {
+    try {
+      const { id } = req.params;
+      const { questions } = req.body;
+
+      const totalMaxMarks = questions.reduce((s: number, q: any) => s + (Number(q.marksAvailable) || 0), 0);
+
+      await (prisma as any).markingSession.update({
+        where: { id },
+        data: { parsedQuestions: questions, totalMaxMarks, parsingVerified: true }
+      });
+
+      logger.info(`Session ${id} locked with MANUALLY entered marks. Total: ${totalMaxMarks}`);
+      res.json({ totalMaxMarks });
+    } catch (error: any) {
+      logger.error('Confirm manual marks error:', error);
       res.status(500).json({ error: error.message });
     }
   });
