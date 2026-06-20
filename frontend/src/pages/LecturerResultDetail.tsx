@@ -43,18 +43,40 @@ const LecturerResultDetail = () => {
   const reEvaluateMutation = useMutation({
     mutationFn: async () => {
       setComparisonResult(null);
-      const res = await apiFetch(`/api/results/${result?.id}/reevaluate`, {
-        method: 'POST'
-      });
-      if (!res.ok) {
-        const errorData = await res.json();
-        throw new Error(errorData.error || 'Failed to re-evaluate');
+      const startRes = await apiFetch(`/api/results/${result?.id}/reevaluate`, { method: 'POST' });
+      const startData = await startRes.json();
+
+      if (!startRes.ok) {
+        throw new Error(startData.error || 'Failed to start re-evaluation');
       }
-      return res.json();
+
+      const { jobId } = startData;
+
+      // Poll every 2 seconds, up to 90 seconds (45 attempts)
+      for (let attempt = 0; attempt < 45; attempt++) {
+        await new Promise(resolve => setTimeout(resolve, 2000));
+
+        const statusRes = await apiFetch(`/api/upload/status/${jobId}`);
+        const statusData = await statusRes.json();
+
+        if (statusData.status === 'COMPLETE') {
+          const comparison = JSON.parse(statusData.text || '{}');
+          return { comparison };
+        }
+
+        if (statusData.status === 'ERROR') {
+          throw new Error(statusData.error || 'Re-evaluation failed');
+        }
+      }
+
+      throw new Error('Re-evaluation is taking longer than expected. Check back in a moment.');
     },
     onSuccess: (data) => {
       setComparisonResult(data.comparison);
       queryClient.invalidateQueries({ queryKey: ['studentResult', sessionId, studentId] });
+    },
+    onError: (error: any) => {
+      alert(error.message || 'Re-evaluation failed. Please try again.');
     }
   });
 

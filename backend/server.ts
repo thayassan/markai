@@ -572,257 +572,132 @@ Rules:
 async function markStudentAnswers(
   studentAnswerText: string,
   studentId: string,
-  questionPdfText: string,
-  markSchemeText: string,
   parsedQuestions: any[],
   parsedMarkScheme: any[],
   session: any
 ): Promise<any> {
-  console.log('✅ markStudentAnswers CALLED for student:', studentId);
-  console.log('📝 Answer text length:', studentAnswerText?.length);
-  console.log('❓ Questions count:', parsedQuestions?.length);
-  console.log('📊 Mark scheme count:', parsedMarkScheme?.length);
 
-  // CRITICAL DIAGNOSTIC — confirm the parameter actually received
-  logger.info(`markStudentAnswers() received studentAnswerText: length=${studentAnswerText?.length || 0}, first 150 chars: "${(studentAnswerText || '').substring(0, 150)}"`);
+  logger.info(`markStudentAnswers() called for ${studentId}: answerText length=${studentAnswerText?.length || 0}, questions=${parsedQuestions?.length || 0}, markScheme entries=${parsedMarkScheme?.length || 0}`);
 
   if (!studentAnswerText || studentAnswerText.trim().length === 0) {
-    logger.error(`🚨 markStudentAnswers() received an EMPTY studentAnswerText parameter for ${studentId}. This is the bug.`);
+    logger.error(`🚨 Empty studentAnswerText passed to markStudentAnswers for ${studentId}`);
+  }
+  if (!parsedQuestions || parsedQuestions.length === 0) {
+    logger.error(`🚨 Empty parsedQuestions passed to markStudentAnswers for ${studentId} — cannot mark without question structure`);
+    throw new Error('No question structure available. Session paper must be parsed before marking.');
   }
 
-  logger.info(`Gemini: Marking student ${studentId}...`);
-
-  // Build strictness instruction based on session setting
   const strictnessInstruction =
     session.markingStrictness === 'Strict'
-      ? `STRICT MARKING:
-         Award marks ONLY when the student uses exact keywords from the mark scheme.
-         Do not give benefit of the doubt.
-         Vague or imprecise answers receive zero marks.
-         Partial credit only when the mark scheme explicitly allows it.`
+      ? `STRICT: Award marks ONLY for answers precisely matching mark scheme keywords. No benefit of the doubt.`
       : session.markingStrictness === 'Lenient'
-      ? `LENIENT MARKING:
-         Award marks when the student clearly understands the concept.
-         Accept reasonable alternative phrasings.
-         Give benefit of the doubt for minor errors.
-         Award partial marks generously for partially correct answers.`
-      : `STANDARD MARKING:
-         Award marks for answers demonstrating correct understanding.
-         Allow minor variations in wording.
-         Do not penalise spelling mistakes unless they change the meaning.
-         Be fair and consistent.`;
+      ? `LENIENT: Award marks for answers demonstrating understanding even without exact wording. Credit creative approaches.`
+      : `STANDARD: Award marks for correct concepts. Allow minor wording variations. Do not penalise spelling unless meaning changes.`;
 
-  // Build feedback instruction based on session setting
   const feedbackInstruction =
     session.feedbackDetail === 'Brief'
-      ? 'Write ONE short sentence of feedback per question.'
-      : `Write detailed feedback per question including:
-         what the student wrote, what was required,
-         why marks were awarded or lost,
-         and one specific improvement suggestion.`;
+      ? 'ONE sentence feedback per question.'
+      : 'Detailed feedback per question: what student wrote, what was required, why marks awarded or lost, specific improvement advice.';
 
-  // Split text into 3000 char chunks to support proper chunking
-  const CHUNK_SIZE = 3000;
-  let textToProcess = studentAnswerText || '';
-  const numChunks = Math.ceil(textToProcess.length / CHUNK_SIZE) || 1;
-  let allQuestions: any[] = [];
-  let overallFeedbackStatements: string[] = [];
-
-  const compactQuestions = parsedQuestions.map((q: any) => 
-    `Q${q.questionNumber} (${q.marksAvailable || q.marks || 0} marks): ${(q.questionText || '').substring(0, 500)}${(q.questionText || '').length > 500 ? '...' : ''}`
-  ).join('\n');
-
-  const compactMarkScheme = parsedMarkScheme.map((q: any) => 
-    `Q${q.questionNumber}: Req:[${(q.requiredKeywords || []).slice(0, 15).join(',')}] Alt:[${(q.acceptAlternatives || []).slice(0, 15).join(',')}] Reject:[${(q.rejectList || []).slice(0, 10).join(',')}] Method:[${(q.methodMarks || '').substring(0, 300)}]`
-  ).join('\n');
-
-  for (let c = 0; c < numChunks; c++) {
-    const chunkStart = c * CHUNK_SIZE;
-    const chunkText = textToProcess.substring(chunkStart, chunkStart + CHUNK_SIZE);
-
-    const prompt = `
-You are an expert ${session.examBoard} senior examiner with 20+ years experience.
-Your marking must be CONSISTENT, FAIR, and EVIDENCE-BASED.
-
-CRITICAL RULES — NEVER BREAK THESE:
-- Never award marks you cannot justify with specific text from the student answer
-- Never penalise correct answers just because they use different wording
-- Always find the BEST interpretation of an ambiguous answer
-- If a student shows understanding but uses wrong terminology, award method marks
-- Never award more marks than the maximum available for any question
-- If answer is blank or completely irrelevant, award exactly 0 marks
-- Match student answer to mark scheme MEANING not just keywords
-
-ANSWER MATCHING RULES:
-- Students may answer questions out of order
-- Look for question numbers written as: 1, 1a, Q1, Question 1, (1)
-- If no question number found, match by topic/content
-- Never skip a question — always check the full answer sheet
-- A student may continue an answer on a new page
-
-CRITICAL JSON RULES:
-- Return ONLY valid JSON — no markdown, no backticks, no comments
-- Never use smart quotes (" ") — use straight quotes (" ") only
-- Never leave trailing commas
-- Escape all special characters in strings
-- If you cannot determine a value, use null not undefined
-
-Assessment type: ${session.sessionType}
+  // NOTE: prompt now relies ENTIRELY on the structured parsedQuestions and
+  // parsedMarkScheme arrays — no raw PDF text needed or referenced anywhere.
+  // This removes the possibility of ever passing an empty/missing raw text
+  // section into the prompt, which was the source of the bug.
+  const prompt = `
+You are an expert ${session.examBoard} exam marker.
+Assessment: ${session.sessionType}
 Subject: ${session.subject}
 Course: ${session.courseId}
 Student ID: ${studentId}
 
 ${strictnessInstruction}
-
 ${feedbackInstruction}
 
-━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
-QUESTIONS EXTRACTED FROM PAPER:
-${compactQuestions}
+━━━━━━━━━━━━━━━━━━━━━━━━━━
+QUESTIONS (locked structure — this paper has exactly these questions, nothing more, nothing less):
+${JSON.stringify(parsedQuestions, null, 2)}
 
-━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
-ACCEPTED ANSWERS FROM MARK SCHEME:
-${compactMarkScheme}
+━━━━━━━━━━━━━━━━━━━━━━━━━━
+MARK SCHEME (locked structure — these are the only accepted answers and criteria):
+${JSON.stringify(parsedMarkScheme, null, 2)}
 
-━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
-STUDENT ${studentId} ANSWER SHEET (Chunk ${c + 1} of ${numChunks})
-${chunkText}
+━━━━━━━━━━━━━━━━━━━━━━━━━━
+STUDENT ${studentId} ANSWER SHEET (this is everything the student wrote — mark only against this):
+${studentAnswerText}
 
-━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+━━━━━━━━━━━━━━━━━━━━━━━━━━
 
-MARKING INSTRUCTIONS:
-1. Compare student answers to mark scheme criteria. Award marks accurately based on mode.
-2. Calculate total marks, max marks, percentage (1 decimal place).
-3. Assign grade: >=90(A*), >=80(A), >=70(B), >=60(C), >=50(D), >=40(E), <40(F).
-4. Write brief overall student performance feedback.
+MARKING STEPS:
+1. For each question in the locked structure above, find the student's corresponding answer in the answer sheet text
+2. Compare it against the locked mark scheme criteria for that exact question number
+3. Award marks based on the marking mode described above
+4. If the student's answer sheet genuinely contains no content for a question number, award 0 marks and mark it unanswered — but only do this if the question number truly does not appear anywhere in the answer sheet text above
+5. Never award more than marksAvailable for any question
+6. Total marks = sum of marksAwarded across all questions
 
-Return ONLY a valid JSON object. No markdown.
-CRITICAL: Only include questions actually answered in this text chunk.
+GRADE SCALE: 90%+ = A*, 80-89% = A, 70-79% = B, 60-69% = C, 50-59% = D, 40-49% = E, below 40% = F
 
-JSON Structure:
+Return ONLY valid JSON. No markdown, no backticks, no extra text:
 {
   "studentId": "${studentId}",
-  "totalMarks": <num>, "maxMarks": <num>, "percentage": <num>,
-  "grade": "<A*/A/B/C/D/E/F>",
-  "overallFeedback": "<summary>",
-  "questions": [{
-    "questionNumber": "<id>", "questionText": "<text>", "topic": "<topic>",
-    "marksAwarded": <num>, "marksAvailable": <num>,
-    "status": "<CORRECT|PARTIAL|INCORRECT>", "studentAnswer": "<text>",
-    "expectedAnswer": "<text>", "keywordsMissing": ["<word>"], 
-    "aiFeedback": "<feedback>", "lostMarksReason": "<reason|null>", "improvementSuggestion": "<idea>",
-    "confidence": <num 0-100>, "confidenceReason": "<why uncertain if < 70>"
-  }]
+  "totalMarks": <number>,
+  "maxMarks": <number>,
+  "percentage": <number rounded to 1 decimal>,
+  "grade": "<letter>",
+  "overallFeedback": "<2-3 sentence summary>",
+  "questions": [
+    {
+      "questionNumber": "<exact from locked structure>",
+      "questionText": "<from locked structure>",
+      "topic": "<from locked structure>",
+      "marksAwarded": <number>,
+      "marksAvailable": <number, must match locked structure exactly>,
+      "status": "<CORRECT|PARTIAL|INCORRECT>",
+      "studentAnswer": "<what student wrote for this question>",
+      "expectedAnswer": "<from mark scheme>",
+      "aiFeedback": "<specific feedback>",
+      "lostMarksReason": "<why marks lost or null>",
+      "improvementSuggestion": "<specific advice>"
+    }
+  ]
 }`;
 
-    const promptTokenEstimate = Math.ceil(prompt.length / 4);
-    console.log(`Chunk ${c+1} prompt size: ~${promptTokenEstimate} tokens`);
+  const response = await callGeminiSafe(prompt, {
+    context: `mark-student-${studentId}`,
+    temperature: 0
+  });
 
-    // CRITICAL DIAGNOSTIC — log the EXACT section of the prompt containing the answer
-    const answerSectionStart = prompt.indexOf(`STUDENT ${studentId} ANSWER SHEET`);
-    logger.info(`PROMPT ANSWER SECTION SENT TO GEMINI: "${prompt.substring(answerSectionStart, answerSectionStart + 300)}"`);
-
-    try {
-      const response = await callGeminiSafe(prompt, {
-        context: `mark-student-${studentId}`,
-        temperature: 0
-      });
-      const text = extractJSON(response.text || '', 'object');
-      const parsedResult = JSON.parse(text);
-
-      if (parsedResult.questions && Array.isArray(parsedResult.questions)) {
-        allQuestions.push(...parsedResult.questions);
-      }
-      if (parsedResult.overallFeedback) {
-        overallFeedbackStatements.push(parsedResult.overallFeedback);
-      }
-    } catch (error: any) {
-      logger.error(`Gemini marking failed for student ${studentId} (Chunk ${c + 1}/${numChunks}):`, error);
-      throw new Error(`Gemini marking failed (Chunk ${c + 1}/${numChunks}): ` + (error.status ? error.status + ' ' : '') + (error.message || 'Unknown'));
-    }
+  let responseText = response.text || '';
+  responseText = responseText.replace(/```json/gi, '').replace(/```/g, '').trim();
+  const jsonStart = responseText.indexOf('{');
+  const jsonEnd = responseText.lastIndexOf('}');
+  if (jsonStart !== -1 && jsonEnd !== -1) {
+    responseText = responseText.substring(jsonStart, jsonEnd + 1);
   }
 
-  // Combine and deduplicate questions across chunks
-  // Keep the version with the highest marksAwarded if duplicated
-  const mergedQuestionsMap = new Map();
-  for (const q of allQuestions) {
-    const existing = mergedQuestionsMap.get(q.questionNumber);
-    if (!existing || Number(q.marksAwarded) > Number(existing.marksAwarded) || (q.studentAnswer && q.studentAnswer !== '[NO ANSWER]' && (!existing.studentAnswer || existing.studentAnswer === '[NO ANSWER]'))) {
-      mergedQuestionsMap.set(q.questionNumber, q);
-    }
-  }
-  
-  const mergedQuestions = Array.from(mergedQuestionsMap.values());
+  let result = JSON.parse(responseText);
 
-  let result: any = {
-    studentId,
-    overallFeedback: overallFeedbackStatements.join(' '),
-    questions: mergedQuestions,
-    totalMarks: 0,
-    maxMarks: 0,
-    percentage: 0,
-    grade: 'F'
-  };
-
-  // Force per-question max marks and structure to match the locked questions exactly
-  if (parsedQuestions && parsedQuestions.length > 0) {
-    result.questions = parsedQuestions.map((pq: any) => {
-      const markedQ = mergedQuestions.find(
-        (q: any) => String(q.questionNumber) === String(pq.questionNumber)
-      );
-
-      const marksAvailable = Number(pq.marksAvailable) || 0;
-      const marksAwarded = markedQ 
-        ? Math.min(Number(markedQ.marksAwarded) || 0, marksAvailable) 
-        : 0;
-
+  // Enforce locked marksAvailable per question — never trust AI's echo of it
+  if (result.questions?.length > 0) {
+    result.questions = result.questions.map((q: any) => {
+      const locked = parsedQuestions.find((pq: any) => pq.questionNumber === q.questionNumber);
       return {
-        questionNumber: pq.questionNumber,
-        questionText: pq.questionText || '',
-        topic: pq.topic || 'General',
-        marksAvailable,
-        marksAwarded,
-        status: marksAwarded === marksAvailable ? 'CORRECT' : marksAwarded > 0 ? 'PARTIAL' : 'INCORRECT',
-        studentAnswer: markedQ?.studentAnswer || '[NO ANSWER]',
-        expectedAnswer: markedQ?.expectedAnswer || '',
-        aiFeedback: markedQ?.aiFeedback || (markedQ ? '' : 'No answer detected in student answer sheet.'),
-        lostMarksReason: markedQ?.lostMarksReason || (markedQ ? null : 'Unanswered'),
-        improvementSuggestion: markedQ?.improvementSuggestion || ''
+        ...q,
+        marksAvailable: locked ? locked.marksAvailable : q.marksAvailable,
+        marksAwarded: Math.min(Number(q.marksAwarded) || 0, locked ? locked.marksAvailable : Number(q.marksAvailable) || 0)
       };
     });
 
-    const recalcTotal = result.questions.reduce((sum: number, q: any) => sum + (Number(q.marksAwarded) || 0), 0);
-    const recalcMax = result.questions.reduce((sum: number, q: any) => sum + (Number(q.marksAvailable) || 0), 0);
-
+    const recalcTotal = result.questions.reduce((s: number, q: any) => s + (Number(q.marksAwarded) || 0), 0);
+    const recalcMax = result.questions.reduce((s: number, q: any) => s + (Number(q.marksAvailable) || 0), 0);
     result.totalMarks = recalcTotal;
-    result.maxMarks = recalcMax; // this will now ALWAYS equal session.totalMaxMarks
+    result.maxMarks = recalcMax;
     result.percentage = recalcMax > 0 ? Math.round((recalcTotal / recalcMax) * 1000) / 10 : 0;
-
     const pct = result.percentage;
-    result.grade =
-      pct >= 90 ? 'A*' :
-      pct >= 80 ? 'A'  :
-      pct >= 70 ? 'B'  :
-      pct >= 60 ? 'C'  :
-      pct >= 50 ? 'D'  :
-      pct >= 40 ? 'E'  : 'F';
+    result.grade = pct >= 90 ? 'A*' : pct >= 80 ? 'A' : pct >= 70 ? 'B' : pct >= 60 ? 'C' : pct >= 50 ? 'D' : pct >= 40 ? 'E' : 'F';
   }
 
-  logger.info(
-    `Gemini marked student ${studentId} in ${numChunks} chunks: ` +
-    `${result.totalMarks}/${result.maxMarks} ` +
-    `(${result.percentage}%) Grade: ${result.grade}`
-  );
-
-  const inputHadContent = studentAnswerText && studentAnswerText.trim().length > 20;
-  const allQuestionsUnanswered = result.questions?.every(
-    (q: any) => q.status === 'INCORRECT' && /no answer/i.test(q.aiFeedback || '')
-  );
-
-  if (inputHadContent && allQuestionsUnanswered) {
-    logger.error(`🚨 MISMATCH for ${studentId}: input had ${studentAnswerText.length} chars of text but Gemini marked ALL questions as unanswered. This indicates the answer text was not properly delivered to the model — check the prompt logs above.`);
-  }
-
+  logger.info(`Marked ${studentId}: ${result.totalMarks}/${result.maxMarks} (${result.percentage}%) ${result.grade}`);
   return validateMarkingResult(result);
 }
 
@@ -839,8 +714,6 @@ async function markStudentAnswersWithConsensus(
     const result = await markStudentAnswers(
       studentAnswerText,
       studentId,
-      '',
-      '',
       parsedQuestions,
       parsedMarkScheme,
       session
@@ -2306,16 +2179,10 @@ Q[number]:
       const parsedQuestions = session.parsedQuestions as any[];
       const parsedMarkScheme = session.parsedMarkScheme as any[];
 
-      // Fetch texts fallbacks for prompt context
-      const questionPdfText = session.questionTextUrl ? await downloadTextFromSupabase(session.questionTextUrl) : '';
-      const markSchemeText = session.markSchemeTextUrl ? await downloadTextFromSupabase(session.markSchemeTextUrl) : '';
-
       // Re-mark logic
       const resultData = await markStudentAnswers(
         answerSheet.extractedText,
         studentId,
-        questionPdfText,
-        markSchemeText,
         parsedQuestions,
         parsedMarkScheme,
         session
@@ -2621,79 +2488,94 @@ Q[number]:
       const session = existingResult.session;
 
       if (!session.parsedQuestions || !session.parsedMarkScheme) {
-        return res.status(400).json({ error: 'Session has no locked question structure. Cannot re-evaluate.' });
+        return res.status(400).json({ error: 'Session has no locked question structure.' });
       }
 
-      // Find the ORIGINAL stored answer sheet — reuse its extractedText exactly,
-      // never re-OCR or re-upload. This isolates marking variance from OCR variance.
       const answerSheet = await (prisma as any).studentAnswerSheet.findFirst({
         where: { sessionId: session.id, studentId: existingResult.studentId }
       });
 
-      if (!answerSheet || !answerSheet.extractedText) {
-        return res.status(400).json({ error: 'Original answer sheet text not found. Cannot re-evaluate.' });
+      if (!answerSheet || !answerSheet.extractedText || answerSheet.extractedText.trim().length < 5) {
+        return res.status(400).json({ error: 'Original answer sheet text not found or empty.' });
       }
 
-      logger.info(`Re-evaluating ${existingResult.studentId} using STORED text (length=${answerSheet.extractedText.length}), comparing against previous result of ${existingResult.totalMarks}/${existingResult.maxMarks}`);
-
-      const newMarkingResult = await markStudentAnswersWithConsensus(
-        answerSheet.extractedText,
-        existingResult.studentId,
-        session.parsedQuestions as any[],
-        session.parsedMarkScheme as any[],
-        session
-      );
-
-      // Log the comparison so consistency can be verified directly in Railway logs
-      logger.info(`RE-EVALUATION COMPARISON for ${existingResult.studentId}:`);
-      logger.info(`  Previous: ${existingResult.totalMarks}/${existingResult.maxMarks}`);
-      logger.info(`  New:      ${newMarkingResult.totalMarks}/${newMarkingResult.maxMarks}`);
-      logger.info(`  Marks identical: ${existingResult.totalMarks === newMarkingResult.totalMarks}`);
-
-      // Delete old question results and replace with new ones
-      await (prisma as any).questionResult.deleteMany({ where: { studentResultId: resultId } });
-
-      const updatedResult = await (prisma as any).studentResult.update({
-        where: { id: resultId },
-        data: {
-          totalMarks: newMarkingResult.totalMarks,
-          maxMarks: newMarkingResult.maxMarks,
-          percentage: newMarkingResult.percentage,
-          grade: newMarkingResult.grade,
-          aiData: newMarkingResult,
-          reviewed: false,
-          questions: {
-            create: newMarkingResult.questions.map((q: any) => ({
-              questionNumber: String(q.questionNumber),
-              questionText: q.questionText || '',
-              topic: q.topic || 'General',
-              marksAwarded: Number(q.marksAwarded) || 0,
-              marksAvailable: Number(q.marksAvailable) || 0,
-              status: q.status || 'INCORRECT',
-              studentAnswer: q.studentAnswer || '',
-              expectedAnswer: q.expectedAnswer || '',
-              aiFeedback: q.aiFeedback || '',
-              lostMarksReason: q.lostMarksReason || null,
-              improvementSuggestion: q.improvementSuggestion || '',
-              aiConfidence: q.aiConfidence || 'High',
-              consensusNote: q.consensusNote || null
-            }))
-          }
-        },
-        include: { questions: true }
+      // Create a job record and respond IMMEDIATELY — no blocking
+      const job = await (prisma as any).uploadJob.create({
+        data: { status: 'PROCESSING', filename: `reevaluate-${existingResult.studentId}` }
       });
 
-      res.json({
-        result: updatedResult,
-        comparison: {
-          previousTotal: existingResult.totalMarks,
-          newTotal: newMarkingResult.totalMarks,
-          changed: existingResult.totalMarks !== newMarkingResult.totalMarks
+      res.json({ jobId: job.id, status: 'PROCESSING' });
+
+      // Background processing — runs after response is already sent
+      (async () => {
+        try {
+          logger.info(`Re-evaluating ${existingResult.studentId} using stored text (length=${answerSheet.extractedText.length}), previous score: ${existingResult.totalMarks}/${existingResult.maxMarks}`);
+
+          const newMarkingResult = await markStudentAnswersWithConsensus(
+            answerSheet.extractedText,
+            existingResult.studentId,
+            session.parsedQuestions as any[],
+            session.parsedMarkScheme as any[],
+            session
+          );
+
+          logger.info(`Re-evaluation result for ${existingResult.studentId}: ${newMarkingResult.totalMarks}/${newMarkingResult.maxMarks} (previous: ${existingResult.totalMarks}/${existingResult.maxMarks})`);
+
+          await (prisma as any).questionResult.deleteMany({ where: { studentResultId: resultId } });
+
+          const updatedResult = await (prisma as any).studentResult.update({
+            where: { id: resultId },
+            data: {
+              totalMarks: newMarkingResult.totalMarks,
+              maxMarks: newMarkingResult.maxMarks,
+              percentage: newMarkingResult.percentage,
+              grade: newMarkingResult.grade,
+              aiData: newMarkingResult,
+              reviewed: false,
+              questions: {
+                create: newMarkingResult.questions.map((q: any) => ({
+                  questionNumber: String(q.questionNumber),
+                  questionText: q.questionText || '',
+                  topic: q.topic || 'General',
+                  marksAwarded: Number(q.marksAwarded) || 0,
+                  marksAvailable: Number(q.marksAvailable) || 0,
+                  status: q.status || 'INCORRECT',
+                  studentAnswer: q.studentAnswer || '',
+                  expectedAnswer: q.expectedAnswer || '',
+                  aiFeedback: q.aiFeedback || '',
+                  lostMarksReason: q.lostMarksReason || null,
+                  improvementSuggestion: q.improvementSuggestion || '',
+                  aiConfidence: q.aiConfidence || 'High',
+                  consensusNote: q.consensusNote || null
+                }))
+              }
+            }
+          });
+
+          await (prisma as any).uploadJob.update({
+            where: { id: job.id },
+            data: {
+              status: 'COMPLETE',
+              extractedText: JSON.stringify({
+                previousTotal: existingResult.totalMarks,
+                newTotal: updatedResult.totalMarks,
+                changed: existingResult.totalMarks !== updatedResult.totalMarks
+              }),
+              completedAt: new Date()
+            }
+          });
+
+        } catch (error: any) {
+          logger.error(`Re-evaluation failed for ${existingResult.studentId}:`, error);
+          await (prisma as any).uploadJob.update({
+            where: { id: job.id },
+            data: { status: 'ERROR', errorMessage: error.message, completedAt: new Date() }
+          });
         }
-      });
+      })();
 
     } catch (error: any) {
-      logger.error('Re-evaluate error:', error);
+      logger.error('Re-evaluate route error:', error);
       res.status(500).json({ error: error.message });
     }
   });
