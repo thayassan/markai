@@ -166,6 +166,8 @@ model QuestionResult {
   improvementSuggestion String
   lecturerOverride      Int?
   lecturerNote          String?       // ADDED — was missing, override endpoint needs this
+  aiConfidence          String?
+  consensusNote         String?
   studentResult         StudentResult @relation(fields: [studentResultId], references: [id])
 
   @@index([studentResultId])
@@ -197,4 +199,11 @@ model UploadJob {
   completedAt       DateTime?
 
   @@index([status])
+}
+
+model OcrCache {
+  id            String   @id @default(cuid())
+  fileHash      String   @unique
+  extractedText String
+  createdAt     DateTime @default(now())
 }

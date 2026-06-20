@@ -325,11 +325,44 @@ class GeminiKeyPool {
 
 const geminiPool = new GeminiKeyPool();
 
-// ─── OCR Result Cache (prevents duplicate API calls on same file) ───────────
-const ocrCache = new Map<string, { text: string; timestamp: number }>();
-
 function getFileHash(buffer: Buffer): string {
   return crypto.createHash('md5').update(buffer).digest('hex');
+}
+
+async function getOrCreateOcrResult(
+  fileBuffer: Buffer,
+  ocrPrompt: string,
+  mimeType: string,
+  context: string
+): Promise<{ text: string; wasCached: boolean }> {
+  const fileHash = getFileHash(fileBuffer);
+
+  const cached = await (prisma as any).ocrCache.findUnique({ where: { fileHash } });
+  if (cached) {
+    logger.info(`OCR cache HIT for hash ${fileHash} — reusing identical transcription, no Gemini call needed`);
+    return { text: cached.extractedText, wasCached: true };
+  }
+
+  const base64Data = fileBuffer.toString('base64');
+  const response = await callGeminiSafe(
+    [{
+      role: 'user',
+      parts: [
+        { inlineData: { data: base64Data, mimeType } },
+        { text: ocrPrompt }
+      ]
+    }],
+    { context, temperature: 0 }
+  );
+
+  const text = response.text?.trim() || '';
+
+  if (text && text !== 'UNREADABLE_DOCUMENT') {
+    await (prisma as any).ocrCache.create({ data: { fileHash, extractedText: text } });
+    logger.info(`OCR result cached permanently for hash ${fileHash}`);
+  }
+
+  return { text, wasCached: false };
 }
 
 // ─── Queue + Retry wrapper for ALL Gemini calls ─────────────────────────────
@@ -791,6 +824,49 @@ JSON Structure:
   }
 
   return validateMarkingResult(result);
+}
+
+async function markStudentAnswersWithConsensus(
+  studentAnswerText: string,
+  studentId: string,
+  parsedQuestions: any[],
+  parsedMarkScheme: any[],
+  session: any,
+  passes: number = 2
+): Promise<any> {
+  const results = [];
+  for (let i = 0; i < passes; i++) {
+    const result = await markStudentAnswers(
+      studentAnswerText,
+      studentId,
+      '',
+      '',
+      parsedQuestions,
+      parsedMarkScheme,
+      session
+    );
+    results.push(result);
+  }
+
+  // Merge results — use the first pass as the base, but flag any question
+  // where marksAwarded differs between passes as low-confidence
+  const baseResult = results[0];
+
+  baseResult.questions = baseResult.questions.map((q: any, idx: number) => {
+    const marksAcrossPasses = results.map(r => r.questions[idx]?.marksAwarded);
+    const allAgree = marksAcrossPasses.every(m => m === marksAcrossPasses[0]);
+
+    return {
+      ...q,
+      aiConfidence: allAgree ? 'High' : 'Low',
+      consensusNote: allAgree ? null : `AI gave different marks across ${passes} passes (${marksAcrossPasses.join(', ')}). Recommend manual review.`
+    };
+  });
+
+  const lowConfidenceCount = baseResult.questions.filter((q: any) => q.aiConfidence === 'Low').length;
+  logger.info(`Consensus marking for ${studentId}: ${lowConfidenceCount}/${baseResult.questions.length} questions had disagreement across passes`);
+
+  return baseResult;
 }
 
 // TypeScript declaration for req.user
@@ -1311,19 +1387,7 @@ async function startServer() {
               return;
             }
 
-            // Check OCR cache first
-            const fileHash = getFileHash(req.file!.buffer);
-            const cached = ocrCache.get(fileHash);
-
-            if (cached && Date.now() - cached.timestamp < 3600000) { // 1 hour cache
-              logger.info(`Using cached OCR result for duplicate file upload (hash: ${fileHash.substring(0, 8)}...)`);
-              extractedText = cached.text;
-              method = isImage ? 'gemini-vision-image-cached' : 'gemini-vision-cached';
-            } else {
-              const base64Data = req.file!.buffer.toString('base64');
-              const mimeType = req.file!.mimetype;
-
-              const ocrPrompt = `This is a handwritten student exam answer sheet${isImage ? ' (photographed image)' : ''}.
+            const ocrPrompt = `This is a handwritten student exam answer sheet${isImage ? ' (photographed image)' : ''}.
 
 Please transcribe ALL content you can see with these rules:
 1. Preserve question numbers exactly as written (Q1, Q1a, 1., etc.)
@@ -1336,42 +1400,35 @@ Format output as:
 Q[number]:
 [student answer here]`;
 
-              try {
-                const response = await callGeminiSafe(
-                  [{
-                    role: 'user',
-                    parts: [
-                      { inlineData: { data: base64Data, mimeType } },
-                      { text: ocrPrompt }
-                    ]
-                  }],
-                  { context: `OCR-${req.file!.originalname}` }
-                );
+            try {
+              const { text, wasCached } = await getOrCreateOcrResult(
+                req.file!.buffer,
+                ocrPrompt,
+                req.file!.mimetype,
+                `OCR-${req.file!.originalname}`
+              );
 
-                const resultText = response.text?.trim() || '';
-
-                if (resultText === 'UNREADABLE_DOCUMENT' || resultText.length === 0) {
-                  await (prisma as any).uploadJob.update({
-                    where: { id: job.id },
-                    data: {
-                      status: 'ERROR',
-                      errorMessage: 'The image could not be read clearly. Please retake the photo with better lighting, or try uploading as PDF.',
-                      completedAt: new Date()
-                    }
-                  });
-                  return;
-                }
-
-                extractedText = resultText;
-                logger.info(`Gemini OCR succeeded for job ${job.id}: ${extractedText.length} chars`);
-
-                // Cache the result
-                ocrCache.set(fileHash, { text: extractedText, timestamp: Date.now() });
-
-              } catch (geminiError: any) {
-                logger.error(`Gemini OCR failed for job ${job.id}:`, geminiError.message);
-                throw geminiError;
+              if (!text || text === 'UNREADABLE_DOCUMENT') {
+                await (prisma as any).uploadJob.update({
+                  where: { id: job.id },
+                  data: {
+                    status: 'ERROR',
+                    errorMessage: 'The image could not be read clearly. Please retake the photo with better lighting, or try uploading as PDF.',
+                    completedAt: new Date()
+                  }
+                });
+                return;
               }
+
+              extractedText = text;
+              if (wasCached) {
+                method += '-cached';
+              }
+              logger.info(`Gemini OCR succeeded for job ${job.id}: ${extractedText.length} chars (wasCached: ${wasCached})`);
+
+            } catch (geminiError: any) {
+              logger.error(`Gemini OCR failed for job ${job.id}:`, geminiError.message);
+              throw geminiError;
             }
           }
 
@@ -2017,11 +2074,9 @@ Q[number]:
             // Step 3: Gemini marks this student
             // Passes full question paper, full mark scheme,
             // parsed JSON of both, and student answer text
-            const markingResult = await markStudentAnswers(
+            const markingResult = await markStudentAnswersWithConsensus(
               studentAnswerText,
               sheet.studentId,
-              questionPdfText,
-              markSchemeText,
               parsedQuestions,
               parsedMarkScheme,
               session
@@ -2053,7 +2108,9 @@ Q[number]:
                     expectedAnswer: q.expectedAnswer || '',
                     aiFeedback: q.aiFeedback || '',
                     lostMarksReason: q.lostMarksReason || null,
-                    improvementSuggestion: q.improvementSuggestion || ''
+                    improvementSuggestion: q.improvementSuggestion || '',
+                    aiConfidence: q.aiConfidence || 'High',
+                    consensusNote: q.consensusNote || null
                   }))
                 }
               }
@@ -2545,6 +2602,99 @@ Q[number]:
       res.json(updated);
     } catch (error: any) {
       res.status(400).json({ error: error.message });
+    }
+  });
+
+  app.post('/api/results/:resultId/reevaluate', authMiddleware, async (req, res) => {
+    try {
+      const { resultId } = req.params;
+
+      const existingResult = await (prisma as any).studentResult.findUnique({
+        where: { id: resultId },
+        include: { session: true }
+      });
+
+      if (!existingResult) {
+        return res.status(404).json({ error: 'Result not found' });
+      }
+
+      const session = existingResult.session;
+
+      if (!session.parsedQuestions || !session.parsedMarkScheme) {
+        return res.status(400).json({ error: 'Session has no locked question structure. Cannot re-evaluate.' });
+      }
+
+      // Find the ORIGINAL stored answer sheet — reuse its extractedText exactly,
+      // never re-OCR or re-upload. This isolates marking variance from OCR variance.
+      const answerSheet = await (prisma as any).studentAnswerSheet.findFirst({
+        where: { sessionId: session.id, studentId: existingResult.studentId }
+      });
+
+      if (!answerSheet || !answerSheet.extractedText) {
+        return res.status(400).json({ error: 'Original answer sheet text not found. Cannot re-evaluate.' });
+      }
+
+      logger.info(`Re-evaluating ${existingResult.studentId} using STORED text (length=${answerSheet.extractedText.length}), comparing against previous result of ${existingResult.totalMarks}/${existingResult.maxMarks}`);
+
+      const newMarkingResult = await markStudentAnswersWithConsensus(
+        answerSheet.extractedText,
+        existingResult.studentId,
+        session.parsedQuestions as any[],
+        session.parsedMarkScheme as any[],
+        session
+      );
+
+      // Log the comparison so consistency can be verified directly in Railway logs
+      logger.info(`RE-EVALUATION COMPARISON for ${existingResult.studentId}:`);
+      logger.info(`  Previous: ${existingResult.totalMarks}/${existingResult.maxMarks}`);
+      logger.info(`  New:      ${newMarkingResult.totalMarks}/${newMarkingResult.maxMarks}`);
+      logger.info(`  Marks identical: ${existingResult.totalMarks === newMarkingResult.totalMarks}`);
+
+      // Delete old question results and replace with new ones
+      await (prisma as any).questionResult.deleteMany({ where: { studentResultId: resultId } });
+
+      const updatedResult = await (prisma as any).studentResult.update({
+        where: { id: resultId },
+        data: {
+          totalMarks: newMarkingResult.totalMarks,
+          maxMarks: newMarkingResult.maxMarks,
+          percentage: newMarkingResult.percentage,
+          grade: newMarkingResult.grade,
+          aiData: newMarkingResult,
+          reviewed: false,
+          questions: {
+            create: newMarkingResult.questions.map((q: any) => ({
+              questionNumber: String(q.questionNumber),
+              questionText: q.questionText || '',
+              topic: q.topic || 'General',
+              marksAwarded: Number(q.marksAwarded) || 0,
+              marksAvailable: Number(q.marksAvailable) || 0,
+              status: q.status || 'INCORRECT',
+              studentAnswer: q.studentAnswer || '',
+              expectedAnswer: q.expectedAnswer || '',
+              aiFeedback: q.aiFeedback || '',
+              lostMarksReason: q.lostMarksReason || null,
+              improvementSuggestion: q.improvementSuggestion || '',
+              aiConfidence: q.aiConfidence || 'High',
+              consensusNote: q.consensusNote || null
+            }))
+          }
+        },
+        include: { questions: true }
+      });
+
+      res.json({
+        result: updatedResult,
+        comparison: {
+          previousTotal: existingResult.totalMarks,
+          newTotal: newMarkingResult.totalMarks,
+          changed: existingResult.totalMarks !== newMarkingResult.totalMarks
+        }
+      });
+
+    } catch (error: any) {
+      logger.error('Re-evaluate error:', error);
+      res.status(500).json({ error: error.message });
     }
   });
 

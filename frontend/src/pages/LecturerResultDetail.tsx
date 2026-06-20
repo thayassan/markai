@@ -15,6 +15,7 @@ const LecturerResultDetail = () => {
   const { id: sessionId, studentId } = useParams();
   const queryClient = useQueryClient();
   const [overrides, setOverrides] = useState<Record<string, { mark: number; note: string }>>({});
+  const [comparisonResult, setComparisonResult] = useState<any>(null);
 
   // Queries
   const { data: result, isLoading, isError } = useQuery({
@@ -41,13 +42,18 @@ const LecturerResultDetail = () => {
 
   const reEvaluateMutation = useMutation({
     mutationFn: async () => {
-      const res = await apiFetch(`/api/sessions/${sessionId}/students/${studentId}/re-evaluate`, {
+      setComparisonResult(null);
+      const res = await apiFetch(`/api/results/${result?.id}/reevaluate`, {
         method: 'POST'
       });
-      if (!res.ok) throw new Error('Failed to re-evaluate');
+      if (!res.ok) {
+        const errorData = await res.json();
+        throw new Error(errorData.error || 'Failed to re-evaluate');
+      }
       return res.json();
     },
-    onSuccess: () => {
+    onSuccess: (data) => {
+      setComparisonResult(data.comparison);
       queryClient.invalidateQueries({ queryKey: ['studentResult', sessionId, studentId] });
     }
   });
@@ -162,7 +168,7 @@ const LecturerResultDetail = () => {
             </div>
          </div>
 
-         <div className="card p-6 bg-bg flex items-center justify-center border-dashed border-2 border-border">
+         <div className="card p-6 bg-bg flex flex-col items-center justify-center border-dashed border-2 border-border gap-2">
             <button 
                onClick={() => reEvaluateMutation.mutate()}
                disabled={reEvaluateMutation.isPending}
@@ -171,6 +177,16 @@ const LecturerResultDetail = () => {
                {reEvaluateMutation.isPending ? <Loader2 size={14} className="animate-spin" /> : <RefreshCcw size={14} />}
                {reEvaluateMutation.isPending ? 'Re-evaluating...' : 'Re-evaluate with AI'}
             </button>
+            {comparisonResult && (
+              <div className={cn(
+                "mt-2 p-2 rounded-lg text-[10px] text-center w-full font-bold",
+                comparisonResult.changed ? 'bg-amber-50 text-amber-700 border border-amber-200' : 'bg-green-50 text-green-700 border border-green-200'
+              )}>
+                {comparisonResult.changed
+                  ? `⚠️ Score changed: ${comparisonResult.previousTotal} → ${comparisonResult.newTotal}`
+                  : `✓ Consistent: scored ${comparisonResult.newTotal} both times`}
+              </div>
+            )}
          </div>
       </div>
 
@@ -215,6 +231,12 @@ const LecturerResultDetail = () => {
                                  <Sparkles size={12} className="inline mr-1 text-accent" />
                                  {q.aiFeedback}
                               </div>
+                              {q.aiConfidence === 'Low' && (
+                                <div className="mt-1 flex items-center gap-1.5 text-[10px] text-amber-600 font-bold bg-amber-50/50 border border-amber-200/50 p-1.5 rounded-md">
+                                  <AlertCircle size={12} className="shrink-0" />
+                                  <span>Low confidence — {q.consensusNote}</span>
+                                </div>
+                              )}
                               {q.lostMarksReason && (
                                  <p className="text-[10px] text-red-500 italic"><AlertCircle size={10} className="inline mr-1" /> {q.lostMarksReason}</p>
                               )}
