@@ -180,6 +180,8 @@ const NewSessionPage = () => {
     estimatedSecondsRemaining: 0,
     status: 'PENDING'
   });
+  const [markingState, setMarkingState] = useState<string | null>(null);
+  const [markingErrorMessage, setMarkingErrorMessage] = useState<string | null>(null);
   const [sessionId, setSessionId] = useState('');
   const [isParsingPaper, setIsParsingPaper] = useState(false);
   const [paperStructure, setPaperStructure] = useState<{
@@ -193,6 +195,15 @@ const NewSessionPage = () => {
   // Errors
   const [errors, setErrors] = useState<Record<string, string>>({});
   const uploadLocksRef = useRef<Set<number>>(new Set());
+  const pollingIntervalRef = useRef<ReturnType<typeof setInterval> | null>(null);
+  const pollingFailureCountRef = useRef(0);
+
+  const stopProgressPolling = () => {
+    if (pollingIntervalRef.current) {
+      clearInterval(pollingIntervalRef.current);
+      pollingIntervalRef.current = null;
+    }
+  };
 
   // Student sheets initialization
   useEffect(() => {
@@ -203,6 +214,12 @@ const NewSessionPage = () => {
         uploading: false, uploaded: false, previewOpen: false
       }]);
     }
+  }, []);
+
+  useEffect(() => {
+    return () => {
+      stopProgressPolling();
+    };
   }, []);
 
   const generateSessionName = () => {
@@ -382,25 +399,74 @@ const NewSessionPage = () => {
     }
   };
 
-  const startProgressPolling = (id: string) => {
-    const interval = setInterval(async () => {
-      if (!id || id === 'undefined') {
-        clearInterval(interval);
+  const startProgressPolling = (sessionId: string) => {
+    stopProgressPolling();
+    pollingFailureCountRef.current = 0;
+    setMarkingState(null);
+    setMarkingErrorMessage(null);
+
+    const MAX_CONSECUTIVE_FAILURES = 5;
+    const MAX_TOTAL_DURATION_MS = 10 * 60 * 1000; // 10 minutes hard ceiling
+    const pollingStartTime = Date.now();
+
+    pollingIntervalRef.current = setInterval(async () => {
+      if (!sessionId || sessionId === 'undefined') {
+        stopProgressPolling();
         return;
       }
-      const res = await apiFetch(`/api/sessions/${id}/progress`);
-      if (!res.ok) return; // Silent skip if polling fails once
-      const data = await res.json();
-      setMarkingProgress(data);
 
-      if (data.status === 'COMPLETE') {
-        clearInterval(interval);
-        const target = `/lecturer/sessions/${id}`;
-        if (window.location.pathname !== target) {
-          setTimeout(() => navigate(target, { replace: true }), 1000);
-        }
+      if (Date.now() - pollingStartTime > MAX_TOTAL_DURATION_MS) {
+        console.warn('Progress polling exceeded max duration, stopping.');
+        stopProgressPolling();
+        setMarkingState('TIMEOUT');
+        return;
       }
 
+      try {
+        const res = await apiFetch(`/api/sessions/${sessionId}/progress`);
+
+        if (!res.ok) {
+          throw new Error(`Progress check failed with status ${res.status}`);
+        }
+
+        const data = await res.json();
+        pollingFailureCountRef.current = 0; // reset failure count on any success
+
+        setMarkingProgress({
+          total: data.total || 0,
+          completed: data.completed || 0,
+          currentStudentId: data.currentStudentId || '',
+          currentStudentName: data.currentStudentName || '',
+          estimatedSecondsRemaining: data.estimatedSecondsRemaining || 0,
+          status: data.status || 'PENDING'
+        });
+
+        if (data.status === 'COMPLETE') {
+          stopProgressPolling();
+          setIsMarking(false);
+          navigate(`/lecturer/sessions/${sessionId}`, { replace: true });
+          return;
+        }
+
+        if (data.status === 'ERROR') {
+          stopProgressPolling();
+          setIsMarking(false);
+          setMarkingState('ERROR');
+          setMarkingErrorMessage(data.errorMessage || 'Marking failed. Please try again.');
+          alert(data.errorMessage || 'Marking failed. Please try again.');
+          return;
+        }
+
+      } catch (error: any) {
+        pollingFailureCountRef.current++;
+        console.warn(`Progress poll failed (attempt ${pollingFailureCountRef.current}/${MAX_CONSECUTIVE_FAILURES}):`, error.message);
+
+        if (pollingFailureCountRef.current >= MAX_CONSECUTIVE_FAILURES) {
+          console.error('Progress polling failed too many times in a row, stopping.');
+          stopProgressPolling();
+          setMarkingState('CONNECTION_LOST');
+        }
+      }
     }, 3000);
   };
 
@@ -1588,72 +1654,104 @@ const NewSessionPage = () => {
             className="fixed inset-0 z-[100] bg-navy/95 flex items-center justify-center p-8 backdrop-blur-md"
           >
             <div className="max-w-md w-full text-center space-y-8">
-              <div className="relative inline-block scale-125">
-                 <div className="w-24 h-24 border-4 border-accent/20 rounded-full flex items-center justify-center mx-auto">
-                    <div className="w-16 h-16 border-4 border-t-accent border-r-accent/30 border-b-accent/10 border-l-accent/50 rounded-full animate-spin" />
-                 </div>
-                 <div className="absolute inset-0 flex items-center justify-center">
-                    <Zap size={32} className="text-accent animate-pulse" fill="currentColor" />
-                 </div>
-              </div>
+              {!markingState ? (
+                <>
+                  <div className="relative inline-block scale-125">
+                     <div className="w-24 h-24 border-4 border-accent/20 rounded-full flex items-center justify-center mx-auto">
+                        <div className="w-16 h-16 border-4 border-t-accent border-r-accent/30 border-b-accent/10 border-l-accent/50 rounded-full animate-spin" />
+                     </div>
+                     <div className="absolute inset-0 flex items-center justify-center">
+                        <Zap size={32} className="text-accent animate-pulse" fill="currentColor" />
+                     </div>
+                  </div>
 
-              <div className="space-y-2">
-                <h1 className="text-3xl font-serif font-bold text-white tracking-tight">AI is marking papers...</h1>
-                <p className="text-white/50 text-sm max-w-xs mx-auto">Evaluating student submissions against your mark scheme using advanced AI evaluation logic.</p>
-              </div>
+                  <div className="space-y-2">
+                    <h1 className="text-3xl font-serif font-bold text-white tracking-tight">AI is marking papers...</h1>
+                    <p className="text-white/50 text-sm max-w-xs mx-auto">Evaluating student submissions against your mark scheme using advanced AI evaluation logic.</p>
+                  </div>
 
-              <div className="bg-white/5 rounded-3xl p-6 border border-white/10 space-y-6">
-                <div className="flex justify-between items-end mb-2">
-                  <div className="text-left">
-                    <p className="text-[10px] font-bold text-white/40 uppercase tracking-widest">Marking Progress</p>
-                    <p className="text-3xl font-serif font-bold text-white mt-1">
-                      {markingProgress.completed} <span className="text-lg font-sans text-white/30">/ {markingProgress.total || studentSheets.length}</span>
+                  <div className="bg-white/5 rounded-3xl p-6 border border-white/10 space-y-6">
+                    <div className="flex justify-between items-end mb-2">
+                      <div className="text-left">
+                        <p className="text-[10px] font-bold text-white/40 uppercase tracking-widest">Marking Progress</p>
+                        <p className="text-3xl font-serif font-bold text-white mt-1">
+                          {markingProgress.completed} <span className="text-lg font-sans text-white/30">/ {markingProgress.total || studentSheets.length}</span>
+                        </p>
+                      </div>
+                      <div className="text-right">
+                        <p className="text-[10px] font-bold text-accent uppercase tracking-widest">Estimated Time</p>
+                        <p className="text-sm font-bold text-white mt-1">~{Math.ceil(markingProgress.estimatedSecondsRemaining / 60)} minutes left</p>
+                      </div>
+                    </div>
+
+                    <div className="h-3 bg-white/10 rounded-full overflow-hidden relative">
+                       <motion.div 
+                        initial={{ width: 0 }}
+                        animate={{ width: `${((markingProgress.completed || 0) / (markingProgress.total || studentSheets.length || 1)) * 100}%` }}
+                        className="h-full bg-gradient-to-r from-accent to-accent-light"
+                       />
+                    </div>
+
+                    {markingProgress.currentStudentName && (
+                      <div className="pt-4 border-t border-white/5 flex items-center justify-center gap-3">
+                        <div className="w-2 h-2 bg-accent rounded-full animate-ping" />
+                        <p className="text-xs text-white/70">
+                          Currently Marking: <span className="font-bold text-white">{markingProgress.currentStudentName}</span>
+                        </p>
+                      </div>
+                    )}
+                  </div>
+
+                  <div className="space-y-6">
+                    <p className="text-white/40 text-xs leading-relaxed max-w-xs mx-auto">
+                      Marking continues in the background even if you leave this page — come back anytime from Sessions to check progress.
                     </p>
+
+                    <div className="flex gap-3 justify-center font-bold">
+                      <button
+                        onClick={handleStartAnotherSession}
+                        className="px-5 py-2.5 bg-white/10 hover:bg-white/20 text-white text-xs font-bold rounded-xl transition-all"
+                      >
+                        Start Another Session
+                      </button>
+                      <button
+                        onClick={() => navigate('/lecturer/dashboard')}
+                        className="px-5 py-2.5 bg-accent hover:bg-accent/90 text-navy font-bold text-xs rounded-xl transition-all shadow-lg shadow-accent/20"
+                      >
+                        Go to Dashboard
+                      </button>
+                    </div>
                   </div>
-                  <div className="text-right">
-                    <p className="text-[10px] font-bold text-accent uppercase tracking-widest">Estimated Time</p>
-                    <p className="text-sm font-bold text-white mt-1">~{Math.ceil(markingProgress.estimatedSecondsRemaining / 60)} minutes left</p>
+                </>
+              ) : markingState === 'CONNECTION_LOST' ? (
+                <div className="text-center max-w-md">
+                  <AlertTriangle size={32} className="text-amber-400 mx-auto mb-4" />
+                  <h2 className="text-xl font-serif font-bold text-white mb-2">
+                    Lost connection to the server
+                  </h2>
+                  <p className="text-white/60 text-sm mb-6">
+                    Marking may still be running in the background. Check the Sessions page in a moment to see if it completed.
+                  </p>
+                  <div className="flex gap-3 justify-center">
+                    <button onClick={() => navigate('/lecturer/sessions')} className="px-5 py-2.5 bg-accent text-navy font-semibold text-sm rounded-lg">
+                      Check Sessions
+                    </button>
                   </div>
                 </div>
-
-                <div className="h-3 bg-white/10 rounded-full overflow-hidden relative">
-                   <motion.div 
-                    initial={{ width: 0 }}
-                    animate={{ width: `${((markingProgress.completed || 0) / (markingProgress.total || studentSheets.length || 1)) * 100}%` }}
-                    className="h-full bg-gradient-to-r from-accent to-accent-light"
-                   />
-                </div>
-
-                {markingProgress.currentStudentName && (
-                  <div className="pt-4 border-t border-white/5 flex items-center justify-center gap-3">
-                    <div className="w-2 h-2 bg-accent rounded-full animate-ping" />
-                    <p className="text-xs text-white/70">
-                      Currently Marking: <span className="font-bold text-white">{markingProgress.currentStudentName}</span>
-                    </p>
-                  </div>
-                )}
-              </div>
-
-              <div className="space-y-6">
-                <p className="text-white/40 text-xs leading-relaxed max-w-xs mx-auto">
-                  Marking continues in the background even if you leave this page — come back anytime from Sessions to check progress.
-                </p>
-
-                <div className="flex gap-3 justify-center font-bold">
-                  <button
-                    onClick={handleStartAnotherSession}
-                    className="px-5 py-2.5 bg-white/10 hover:bg-white/20 text-white text-xs font-bold rounded-xl transition-all"
-                  >
-                    Start Another Session
+              ) : markingState === 'TIMEOUT' ? (
+                <div className="text-center max-w-md">
+                  <Clock size={32} className="text-amber-400 mx-auto mb-4" />
+                  <h2 className="text-xl font-serif font-bold text-white mb-2">
+                    This is taking longer than expected
+                  </h2>
+                  <p className="text-white/60 text-sm mb-6">
+                    Marking continues in the background. Check the Sessions page shortly for an update.
+                  </p>
+                  <button onClick={() => navigate('/lecturer/sessions')} className="px-5 py-2.5 bg-accent text-navy font-semibold text-sm rounded-lg">
+                    Go to Sessions
                   </button>
-                  <button
-                    onClick={() => navigate('/lecturer/dashboard')}
-                    className="px-5 py-2.5 bg-accent hover:bg-accent/90 text-navy font-bold text-xs rounded-xl transition-all shadow-lg shadow-accent/20"
-                  >
-                    Go to Dashboard
-                  </button>
                 </div>
-              </div>
+              ) : null}
             </div>
           </motion.div>
         )}

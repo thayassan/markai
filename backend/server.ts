@@ -2435,8 +2435,46 @@ Log in to MarkAI to review results.`.trim()
     }
   );
 
-  app.get('/api/sessions/:id/progress', authMiddleware, (req, res) => {
-    res.json(markingProgress.get(req.params.id) || { total: 0, completed: 0, currentStudentId: '', currentStudentName: '', status: 'PENDING', estimatedSecondsRemaining: 0 });
+  app.get('/api/sessions/:id/progress', authMiddleware, async (req, res) => {
+    const { id } = req.params;
+    const progress = markingProgress.get(id);
+
+    if (!progress) {
+      // No in-memory progress entry usually means it's either not started,
+      // or already finished and cleaned up — check the DB for the real status
+      try {
+        const session = await (prisma as any).markingSession.findUnique({
+          where: { id },
+          select: { status: true, errorMessage: true }
+        });
+
+        if (!session) {
+          return res.status(404).json({ error: 'Session not found' });
+        }
+
+        return res.json({
+          status: session.status === 'ERROR' ? 'ERROR' : (session.status === 'REVIEW_REQUIRED' || session.status === 'COMPLETE' ? 'COMPLETE' : 'PENDING'),
+          errorMessage: session.errorMessage,
+          total: 0,
+          completed: 0,
+          currentStudentId: '',
+          currentStudentName: '',
+          estimatedSecondsRemaining: 0
+        });
+      } catch (dbError) {
+        return res.json({
+          status: 'PENDING',
+          errorMessage: null,
+          total: 0,
+          completed: 0,
+          currentStudentId: '',
+          currentStudentName: '',
+          estimatedSecondsRemaining: 0
+        });
+      }
+    }
+
+    res.json(progress);
   });
 
   app.get('/api/sessions/:id/results', authMiddleware, async (req, res) => {
