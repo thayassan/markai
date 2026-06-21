@@ -557,6 +557,10 @@ const NewSessionPage = () => {
     return Object.keys(newErrors).length === 0;
   };
 
+  const handleStartAnotherSession = () => {
+    window.location.href = '/lecturer/sessions/new';
+  };
+
   // --- Components ---
 
   const StepIndicator = () => (
@@ -1637,7 +1641,7 @@ const NewSessionPage = () => {
 
                 <div className="flex gap-3 justify-center font-bold">
                   <button
-                    onClick={() => navigate('/lecturer/sessions/new')}
+                    onClick={handleStartAnotherSession}
                     className="px-5 py-2.5 bg-white/10 hover:bg-white/20 text-white text-xs font-bold rounded-xl transition-all"
                   >
                     Start Another Session

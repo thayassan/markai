@@ -1250,7 +1250,7 @@ async function startServer() {
       // I'll send an email for now as there's no Feedback model in schema.prisma.
       await resend.emails.send({
         from: 'MarkAI Feedback <feedback@markai.edu>',
-        to: 'admin@markai.edu',
+        to: 'admin@admin.edu',
         subject: `New Feedback from ${req.user.email}`,
         text: `Rating: ${rating}/5\n\nFeedback: ${quote}`
       });
@@ -1272,6 +1272,63 @@ async function startServer() {
       res.status(500).json({ error: error.message });
     }
   });
+
+  const KNOWN_SCAN_APP_WATERMARKS = [
+    'camscanner', 'adobe scan', 'microsoft lens', 'office lens',
+    'genius scan', 'scanner pro', 'tiny scanner', 'notes scanner',
+    'scanned with', 'scanned by', 'created with camscanner'
+  ];
+
+  function assessExtractionQuality(text: string): {
+    isLikelyJunk: boolean;
+    reason: string | null;
+  } {
+    if (!text || text.trim().length === 0) {
+      return { isLikelyJunk: true, reason: 'No text extracted at all' };
+    }
+
+    const trimmed = text.trim();
+    const lowerText = trimmed.toLowerCase();
+
+    // Check 1: Matches a known scanning-app watermark with little else around it
+    const matchedWatermark = KNOWN_SCAN_APP_WATERMARKS.find(w => lowerText.includes(w));
+    if (matchedWatermark) {
+      // Strip out the watermark occurrences and see what's actually left
+      const withoutWatermark = lowerText.split(matchedWatermark).join('').trim();
+      if (withoutWatermark.length < 30) {
+        return {
+          isLikelyJunk: true,
+          reason: `Extracted text appears to be just a scanning app watermark ("${matchedWatermark}") with no actual answer content`
+        };
+      }
+    }
+
+    // Check 2: High repetition — same short line repeated many times
+    // (e.g. "CamScanner\nCamScanner\nCamScanner\nCamScanner")
+    const lines = trimmed.split(/[\n\r]+/).map(l => l.trim()).filter(l => l.length > 0);
+    if (lines.length >= 3) {
+      const uniqueLines = new Set(lines);
+      const repetitionRatio = 1 - (uniqueLines.size / lines.length);
+      const avgLineLength = lines.reduce((s, l) => s + l.length, 0) / lines.length;
+
+      if (repetitionRatio > 0.6 && avgLineLength < 25) {
+        return {
+          isLikelyJunk: true,
+          reason: `Extracted text is mostly repeated short lines (${uniqueLines.size} unique out of ${lines.length} lines) — likely a watermark or scan artifact, not handwritten answers`
+        };
+      }
+    }
+
+    // Check 3: Suspiciously short for a real answer sheet
+    if (trimmed.length < 20) {
+      return {
+        isLikelyJunk: true,
+        reason: 'Extracted text is too short to be a real answer sheet'
+      };
+    }
+
+    return { isLikelyJunk: false, reason: null };
+  }
 
   app.post('/api/upload/answer-pdf', authMiddleware, upload.single('file'), async (req, res) => {
     try {
@@ -1348,18 +1405,24 @@ async function startServer() {
               return;
             }
 
-            const ocrPrompt = `This is a handwritten student exam answer sheet${isImage ? ' (photographed image)' : ''}.
+            const ocrPrompt = `
+Transcribe ALL handwritten or printed answer content from this exam answer sheet image with complete accuracy.
 
-Please transcribe ALL content you can see with these rules:
-1. Preserve question numbers exactly as written (Q1, Q1a, 1., etc.)
-2. Transcribe each student answer completely
-3. If a question is left blank write [NO ANSWER]
-4. If handwriting is unclear write best interpretation with [UNCLEAR] marker
-5. If the image is blurry, dark, or unreadable, respond with exactly: UNREADABLE_DOCUMENT
+IMPORTANT — IGNORE THE FOLLOWING, they are not part of the student's answers:
+- Scanning app watermarks or branding (e.g. "CamScanner", "Adobe Scan", "Microsoft Lens", page borders/logos added by scanning apps)
+- Page numbers, headers, or footers added by the scanning software itself
+- Any text that is clearly an app UI element rather than something the student wrote
 
-Format output as:
-Q[number]:
-[student answer here]`;
+Focus ONLY on the student's actual handwritten or written answer content for each question.
+
+If after ignoring watermarks and app branding there is genuinely no answer content
+visible on this page (e.g. it's a blank page, a cover page, or only contains a
+scanning app watermark with nothing else), respond with exactly: UNREADABLE_DOCUMENT
+
+Format your response as:
+Q1: [transcribed answer]
+Q2: [transcribed answer]
+... (continue for all visible questions)`;
 
             try {
               const { text, wasCached } = await getOrCreateOcrResult(
@@ -1375,6 +1438,21 @@ Q[number]:
                   data: {
                     status: 'ERROR',
                     errorMessage: 'The image could not be read clearly. Please retake the photo with better lighting, or try uploading as PDF.',
+                    completedAt: new Date()
+                  }
+                });
+                return;
+              }
+
+              // NEW — catch watermark/junk extractions before they're treated as real answers
+              const quality = assessExtractionQuality(text);
+              if (quality.isLikelyJunk) {
+                logger.warn(`OCR quality check FAILED for job ${job.id} (${req.file!.originalname}): ${quality.reason}. Raw extracted text: "${text.substring(0, 200)}"`);
+                await (prisma as any).uploadJob.update({
+                  where: { id: job.id },
+                  data: {
+                    status: 'ERROR',
+                    errorMessage: `This file appears to only contain a scanning app watermark, not the actual answers (extracted: "${text.substring(0, 60)}${text.length > 60 ? '...' : ''}"). Please check the file has the actual handwritten pages, or type the answer manually.`,
                     completedAt: new Date()
                   }
                 });
