@@ -1837,7 +1837,6 @@ Q2: [transcribed answer]
       let markSchemeText = '';
 
       // --- Load Question Paper Text ---
-      // Priority 1: Supabase Storage text URL
       if (session.questionTextUrl) {
         try {
           questionPdfText = await downloadTextFromSupabase(session.questionTextUrl);
@@ -1847,13 +1846,11 @@ Q2: [transcribed answer]
         }
       }
 
-      // Priority 2: Request body fallback
       if (!questionPdfText && req.body.questionPdfText) {
         questionPdfText = req.body.questionPdfText;
         logger.warn('Using question paper text from request body fallback');
       }
 
-      // Priority 3: Re-extract from stored PDF using Gemini
       if ((!questionPdfText || questionPdfText.trim().length < 10) && session.questionPdfUrl) {
         logger.info('Attempting to re-extract question paper from stored PDF...');
         try {
@@ -1874,7 +1871,6 @@ Q2: [transcribed answer]
             }
             if (questionPdfText.length >= 10) {
               logger.info(`Re-extracted question paper text (${questionPdfText.length} chars)`);
-              // Save for future use
               try {
                 const textPath = await uploadTextToSupabase(questionPdfText, 'question-reextract', 'texts');
                 await (prisma as any).markingSession.update({ where: { id }, data: { questionTextUrl: textPath } });
@@ -1901,7 +1897,6 @@ Q2: [transcribed answer]
         logger.warn('Using mark scheme text from request body fallback');
       }
 
-      // Priority 3: Re-extract from stored PDF
       if ((!markSchemeText || markSchemeText.trim().length < 10) && session.markSchemePdfUrl) {
         logger.info('Attempting to re-extract mark scheme from stored PDF...');
         try {
@@ -1950,7 +1945,7 @@ Q2: [transcribed answer]
         });
       }
 
-      // Fetch all pending or errored student answer sheets for retry
+      // Fetch all pending or errored student answer sheets for marking
       const answerSheets = await (prisma as any).studentAnswerSheet.findMany({
         where: { 
           sessionId: id, 
@@ -1968,6 +1963,68 @@ Q2: [transcribed answer]
       
       logger.info(`Starting marking process for ${answerSheets.length} students in session ${id}`);
 
+      // Update session status in Supabase PostgreSQL
+      await (prisma as any).markingSession.update({
+        where: { id },
+        data: { status: 'MARKING', errorMessage: null }
+      });
+
+      // Send immediate response so frontend can poll progress
+      res.json({
+        message: 'Marking started',
+        total: answerSheets.length,
+        status: 'MARKING'
+      });
+
+      // Trigger background marking pipeline (fire and forget)
+      triggerBackgroundMarking(id, questionPdfText, markSchemeText);
+
+    } catch (error: any) {
+      logger.error('Marking route error:', error);
+      res.status(500).json({ error: error.message });
+    }
+  });
+
+  async function triggerBackgroundMarking(id: string, initialQuestionText?: string, initialMarkSchemeText?: string) {
+    let completed = 0;
+    const errors: string[] = [];
+
+    try {
+      logger.info(`═══ MARKING STARTED for session ${id} ═══`);
+
+      const session = await (prisma as any).markingSession.findUnique({
+        where: { id },
+        include: { answerSheets: true }
+      });
+
+      if (!session) {
+        throw new Error(`Session ${id} not found.`);
+      }
+
+      if (!session.parsedQuestions || !session.parsedMarkScheme) {
+        throw new Error('Session has no locked question structure. Paper must be parsed before marking.');
+      }
+
+      const parsedQuestions = session.parsedQuestions as any[];
+      const parsedMarkScheme = session.parsedMarkScheme as any[];
+
+      const answerSheets = await (prisma as any).studentAnswerSheet.findMany({
+        where: {
+          sessionId: id,
+          status: { in: ['PENDING', 'ERROR'] }
+        }
+      });
+
+      logger.info(`Found ${answerSheets.length} answer sheets to mark in session ${id}`);
+      if (answerSheets.length === 0) {
+        logger.info(`No pending/errored answer sheets for session ${id}. Marking finished.`);
+        await (prisma as any).markingSession.update({
+          where: { id },
+          data: { status: 'REVIEW_REQUIRED' }
+        });
+        return;
+      }
+
       // Initialize progress tracker
       markingProgress.set(id, {
         total: answerSheets.length,
@@ -1978,301 +2035,375 @@ Q2: [transcribed answer]
         estimatedSecondsRemaining: answerSheets.length * 30
       });
 
-      // Update session status in Supabase PostgreSQL
-      await (prisma as any).markingSession.update({
-        where: { id },
-        data: { status: 'MARKING' }
-      });
+      let questionPdfText = initialQuestionText || '';
+      let markSchemeText = initialMarkSchemeText || '';
 
-      // Send immediate response so frontend can poll progress
-      res.json({
-        message: 'Marking started',
-        total: answerSheets.length,
-        status: 'MARKING'
-      });
-
-      // ─────────────────────────────────────────────────
-      // BACKGROUND PROCESS — runs after response is sent
-      // ─────────────────────────────────────────────────
-      (async () => {
-        let completed = 0;
-        const errors: string[] = [];
-
-        console.log('📄 Extracting text from question paper...');
-        console.log('✅ Question paper extracted:', questionPdfText?.length, 'chars');
-
-        console.log('📄 Extracting text from mark scheme...');
-        console.log('✅ Mark scheme extracted:', markSchemeText?.length, 'chars');
-
-        // ───────────────────────────────────────────────
-        // USE THE LOCKED STRUCTURE — never re-parse here.
-        // Parsing must have already happened via /parse-paper
-        // before marking starts.
-        // ───────────────────────────────────────────────
-        if (!session.parsedQuestions || !session.parsedMarkScheme) {
-          logger.error(`Session ${id} has no locked question structure. Marking cannot proceed.`);
-          await (prisma as any).markingSession.update({
-            where: { id },
-            data: { status: 'ERROR' }
-          });
-          markingProgress.set(id, {
-            total: 0, completed: 0, currentStudentId: '', currentStudentName: '',
-            status: 'ERROR', estimatedSecondsRemaining: 0
-          });
-          return;
+      if (!questionPdfText && session.questionTextUrl) {
+        try {
+          questionPdfText = await downloadTextFromSupabase(session.questionTextUrl);
+          logger.info(`Question paper text loaded from Supabase Storage (${questionPdfText.length} chars)`);
+        } catch (e) {
+          logger.error('Failed to load question paper text from Supabase:', e);
         }
+      }
 
-        const parsedQuestions = session.parsedQuestions as any[];
-        const parsedMarkScheme = session.parsedMarkScheme as any[];
-
-        logger.info(`Using LOCKED structure for session ${id}: ${parsedQuestions.length} questions, ${session.totalMaxMarks} total marks`);
-
-        // ───────────────────────────────────────────────
-        // MARK EACH STUDENT
-        // ───────────────────────────────────────────────
-        const dbRetry = async (fn: () => Promise<any>, retries = 3, delay = 1000) => {
-          for (let i = 0; i < retries; i++) {
+      if (!questionPdfText && session.questionPdfUrl) {
+        logger.info('Attempting to re-extract question paper from stored PDF...');
+        try {
+          const { data: pdfData, error: dlErr } = await supabase.storage.from('markai-pdfs').download(session.questionPdfUrl);
+          if (!dlErr && pdfData) {
+            const buffer = Buffer.from(await pdfData.arrayBuffer());
             try {
-              return await fn();
-            } catch (err: any) {
-              if (err.code === 'P2024' && i < retries - 1) {
-                logger.warn(`Database connection busy, retrying in ${delay}ms... (Attempt ${i + 1}/${retries})`);
-                await new Promise(r => setTimeout(r, delay));
-                delay *= 2;
-                continue;
-              }
-              throw err;
+              const parsed = await pdf(buffer);
+              questionPdfText = parsed.text?.trim() || '';
+            } catch (e) { /* pdf-parse failed */ }
+            if (questionPdfText.length < 50) {
+              const base64 = buffer.toString('base64');
+              const resp = await callGeminiSafe(
+                [{ parts: [{ inlineData: { data: base64, mimeType: 'application/pdf' } }, { text: 'Extract ALL text from this exam question paper. Preserve question numbers and marks. Return only the text content.' }] }],
+                { context: 'reextract-question-paper' }
+              );
+              questionPdfText = resp.text?.trim() || '';
+            }
+            if (questionPdfText.length >= 10) {
+              logger.info(`Re-extracted question paper text (${questionPdfText.length} chars)`);
+              try {
+                const textPath = await uploadTextToSupabase(questionPdfText, 'question-reextract', 'texts');
+                await (prisma as any).markingSession.update({ where: { id }, data: { questionTextUrl: textPath } });
+              } catch (e) { /* non-critical */ }
             }
           }
-        };
+        } catch (e: any) {
+          logger.error('Re-extraction of question paper failed:', e.message);
+        }
+      }
 
-        const limit = pLimit(3);
-        await Promise.all(answerSheets.map((sheet: any) => limit(async () => {
+      if (!markSchemeText && session.markSchemeTextUrl) {
+        try {
+          markSchemeText = await downloadTextFromSupabase(session.markSchemeTextUrl);
+          logger.info(`Mark scheme text loaded from Supabase Storage (${markSchemeText.length} chars)`);
+        } catch (e: any) {
+          logger.error(`Failed to load mark scheme text:`, e);
+        }
+      }
+
+      if (!markSchemeText && session.markSchemePdfUrl) {
+        logger.info('Attempting to re-extract mark scheme from stored PDF...');
+        try {
+          const { data: pdfData, error: dlErr } = await supabase.storage.from('markai-pdfs').download(session.markSchemePdfUrl);
+          if (!dlErr && pdfData) {
+            const buffer = Buffer.from(await pdfData.arrayBuffer());
+            try {
+              const parsed = await pdf(buffer);
+              markSchemeText = parsed.text?.trim() || '';
+            } catch (e) { /* pdf-parse failed */ }
+            if (markSchemeText.length < 50) {
+              const base64 = buffer.toString('base64');
+              const resp = await callGeminiSafe(
+                [{ parts: [{ inlineData: { data: base64, mimeType: 'application/pdf' } }, { text: 'Extract ALL text from this mark scheme. Preserve question numbers, accepted answers, marks, and marking guidance. Return only the text content.' }] }],
+                { context: 'reextract-mark-scheme' }
+              );
+              markSchemeText = resp.text?.trim() || '';
+            }
+            if (markSchemeText.length >= 10) {
+              logger.info(`Re-extracted mark scheme text (${markSchemeText.length} chars)`);
+              try {
+                const textPath = await uploadTextToSupabase(markSchemeText, 'markscheme-reextract', 'texts');
+                await (prisma as any).markingSession.update({ where: { id }, data: { markSchemeTextUrl: textPath } });
+              } catch (e) { /* non-critical */ }
+            }
+          }
+        } catch (e: any) {
+          logger.error('Re-extraction of mark scheme failed:', e.message);
+        }
+      }
+
+      if (!questionPdfText || questionPdfText.trim().length < 10) {
+        throw new Error('Question paper text is missing or too short.');
+      }
+
+      if (!markSchemeText || markSchemeText.trim().length < 10) {
+        throw new Error('Mark scheme text is missing or too short.');
+      }
+
+      const dbRetry = async (fn: () => Promise<any>, retries = 3, delay = 1000) => {
+        for (let i = 0; i < retries; i++) {
           try {
-            // Update progress
-            markingProgress.set(id, {
-              total: answerSheets.length,
-              completed,
-              currentStudentId: sheet.studentId,
-              currentStudentName: sheet.studentName || sheet.studentId,
-              status: 'MARKING',
-              estimatedSecondsRemaining: (answerSheets.length - completed) * 30
-            });
-
-            // Get student answer text
-            let studentAnswerText = sheet.extractedText;
-
-            logger.info(`Student ${sheet.studentId} — extractedText from DB: length=${studentAnswerText?.length || 0}, preview="${(studentAnswerText || '').substring(0, 80)}"`);
-
-            // Try Supabase Storage text file if text not in DB
-            if (
-              (!studentAnswerText || studentAnswerText.trim().length < 5) &&
-              (sheet as any).textUrl
-            ) {
-              logger.warn(`Student ${sheet.studentId} — extractedText empty in DB, attempting Supabase Storage fallback from textUrl: ${(sheet as any).textUrl}`);
-              try {
-                studentAnswerText = await downloadTextFromSupabase(
-                  (sheet as any).textUrl
-                );
-                logger.info(`Student ${sheet.studentId} — fallback download succeeded: length=${studentAnswerText?.length || 0}`);
-              } catch (e: any) {
-                logger.error(
-                  `Student ${sheet.studentId} — fallback download FAILED:`, e.message
-                );
-              }
+            return await fn();
+          } catch (err: any) {
+            if (err.code === 'P2024' && i < retries - 1) {
+              logger.warn(`Database connection busy, retrying in ${delay}ms... (Attempt ${i + 1}/${retries})`);
+              await new Promise(r => setTimeout(r, delay));
+              delay *= 2;
+              continue;
             }
+            throw err;
+          }
+        }
+      };
 
-            // Re-extract from stored PDF if still no text
-            if (
-              (!studentAnswerText || studentAnswerText.trim().length < 5) &&
-              sheet.pdfUrl
-            ) {
-              logger.info(`Re-extracting answer text for ${sheet.studentId} from stored PDF...`);
-              try {
-                const { data: pdfData, error: dlErr } = await supabase.storage.from('markai-pdfs').download(sheet.pdfUrl);
-                if (!dlErr && pdfData) {
-                  const buffer = Buffer.from(await pdfData.arrayBuffer());
-                  try {
-                    const parsed = await pdf(buffer);
-                    studentAnswerText = parsed.text?.trim() || '';
-                  } catch (e) { /* pdf-parse failed */ }
-                  if (!studentAnswerText || studentAnswerText.length < 50) {
-                    const base64 = buffer.toString('base64');
-                    const ocrResp = await callGeminiSafe(
-                      [{ parts: [
-                        { inlineData: { data: base64, mimeType: 'application/pdf' } },
-                        { text: 'This is a student exam answer sheet. Transcribe ALL content. Preserve question numbers (Q1, 1a, etc). If handwritten, do your best to read it. Format: Q[number]:\n[answer]' }
-                      ] }],
-                      { context: `reextract-student-${sheet.studentId}` }
-                    );
-                    studentAnswerText = ocrResp.text?.trim() || '';
-                  }
-                  if (studentAnswerText.length >= 5) {
-                    logger.info(`Re-extracted answer text for ${sheet.studentId} (${studentAnswerText.length} chars)`);
-                    // Update the answer sheet with the extracted text
-                    await (prisma as any).studentAnswerSheet.update({
-                      where: { id: sheet.id },
-                      data: { extractedText: studentAnswerText.substring(0, 50000) }
-                    });
-                  }
+      const limit = pLimit(3);
+      await Promise.all(answerSheets.map((sheet: any) => limit(async () => {
+        try {
+          markingProgress.set(id, {
+            total: answerSheets.length,
+            completed,
+            currentStudentId: sheet.studentId,
+            currentStudentName: sheet.studentName || sheet.studentId,
+            status: 'MARKING',
+            estimatedSecondsRemaining: (answerSheets.length - completed) * 30
+          });
+
+          let studentAnswerText = sheet.extractedText;
+
+          logger.info(`Student ${sheet.studentId} — extractedText from DB: length=${studentAnswerText?.length || 0}, preview="${(studentAnswerText || '').substring(0, 80)}"`);
+
+          if (
+            (!studentAnswerText || studentAnswerText.trim().length < 5) &&
+            (sheet as any).textUrl
+          ) {
+            logger.warn(`Student ${sheet.studentId} — extractedText empty in DB, attempting Supabase Storage fallback from textUrl: ${(sheet as any).textUrl}`);
+            try {
+              studentAnswerText = await downloadTextFromSupabase(
+                (sheet as any).textUrl
+              );
+              logger.info(`Student ${sheet.studentId} — fallback download succeeded: length=${studentAnswerText?.length || 0}`);
+            } catch (e: any) {
+              logger.error(
+                `Student ${sheet.studentId} — fallback download FAILED:`, e.message
+              );
+            }
+          }
+
+          if (
+            (!studentAnswerText || studentAnswerText.trim().length < 5) &&
+            sheet.pdfUrl
+          ) {
+            logger.info(`Re-extracting answer text for ${sheet.studentId} from stored PDF...`);
+            try {
+              const { data: pdfData, error: dlErr } = await supabase.storage.from('markai-pdfs').download(sheet.pdfUrl);
+              if (!dlErr && pdfData) {
+                const buffer = Buffer.from(await pdfData.arrayBuffer());
+                try {
+                  const parsed = await pdf(buffer);
+                  studentAnswerText = parsed.text?.trim() || '';
+                } catch (e) { /* pdf-parse failed */ }
+                if (!studentAnswerText || studentAnswerText.length < 50) {
+                  const base64 = buffer.toString('base64');
+                  const ocrResp = await callGeminiSafe(
+                    [{ parts: [
+                      { inlineData: { data: base64, mimeType: 'application/pdf' } },
+                      { text: 'This is a student exam answer sheet. Transcribe ALL content. Preserve question numbers (Q1, 1a, etc). If handwritten, do your best to read it. Format: Q[number]:\n[answer]' }
+                    ] }],
+                    { context: `reextract-student-${sheet.studentId}` }
+                  );
+                  studentAnswerText = ocrResp.text?.trim() || '';
                 }
-              } catch (e: any) {
-                logger.error(`Re-extraction failed for ${sheet.studentId}:`, e.message);
-              }
-            }
-
-            // Skip student if still no answer text after all attempts
-            if (!studentAnswerText || studentAnswerText.trim().length < 5) {
-              logger.error(`Student ${sheet.studentId} — NO ANSWER TEXT AVAILABLE from either DB or storage. Skipping.`);
-              await (prisma as any).studentAnswerSheet.update({
-                where: { id: sheet.id },
-                data: { status: 'SKIPPED', errorMessage: 'No extracted text was available at marking time' }
-              });
-              completed++;
-              return;
-            }
-
-            logger.info(`═══ PRE-MARKING CHECK for ${sheet.studentId} ═══`);
-            logger.info(`studentAnswerText variable: length=${studentAnswerText?.length || 0}`);
-            logger.info(`studentAnswerText preview: "${(studentAnswerText || '').substring(0, 200)}"`);
-            logger.info(`Using locked questions: ${parsedQuestions?.length || 0} found`);
-            logger.info(`Using locked mark scheme: ${parsedMarkScheme?.length || 0} found`);
-            logger.info(`═══════════════════════════════════`);
-
-            // Step 3: Gemini marks this student
-            // Passes full question paper, full mark scheme,
-            // parsed JSON of both, and student answer text
-            const markingResult = await markStudentAnswersWithConsensus(
-              studentAnswerText,
-              sheet.studentId,
-              parsedQuestions,
-              parsedMarkScheme,
-              session
-            );
-
-            // Step 4: Save result to Supabase PostgreSQL via Prisma with Retry
-            await dbRetry(() => (prisma as any).studentResult.create({
-              data: {
-                sessionId: id,
-                studentId: sheet.studentId,
-                studentName: sheet.studentName,
-                studentCode: sheet.studentId,
-                answerPdfUrl: sheet.pdfUrl,
-                totalMarks: markingResult.totalMarks,
-                maxMarks: markingResult.maxMarks,
-                percentage: markingResult.percentage,
-                grade: markingResult.grade,
-                reviewed: false,
-                aiData: markingResult,
-                questions: {
-                  create: markingResult.questions.map((q: any) => ({
-                    questionNumber: String(q.questionNumber),
-                    questionText: q.questionText || '',
-                    topic: q.topic || 'General',
-                    marksAwarded: Number(q.marksAwarded) || 0,
-                    marksAvailable: Number(q.marksAvailable) || 0,
-                    status: q.status || 'INCORRECT',
-                    studentAnswer: q.studentAnswer || '',
-                    expectedAnswer: q.expectedAnswer || '',
-                    aiFeedback: q.aiFeedback || '',
-                    lostMarksReason: q.lostMarksReason || null,
-                    improvementSuggestion: q.improvementSuggestion || '',
-                    aiConfidence: q.aiConfidence || 'High',
-                    consensusNote: q.consensusNote || null
-                  }))
+                if (studentAnswerText.length >= 5) {
+                  logger.info(`Re-extracted answer text for ${sheet.studentId} (${studentAnswerText.length} chars)`);
+                  await (prisma as any).studentAnswerSheet.update({
+                    where: { id: sheet.id },
+                    data: { extractedText: studentAnswerText.substring(0, 50000) }
+                  });
                 }
               }
-            }));
+            } catch (e: any) {
+              logger.error(`Re-extraction failed for ${sheet.studentId}:`, e.message);
+            }
+          }
 
-            // Update answer sheet status in Supabase PostgreSQL with Retry
-            await dbRetry(() => (prisma as any).studentAnswerSheet.update({
-              where: { id: sheet.id },
-              data: { status: 'COMPLETE' }
-            }));
-
-            completed++;
-
-            logger.info(
-              `✅ ${sheet.studentId}: ` +
-              `${markingResult.totalMarks}/${markingResult.maxMarks} ` +
-              `Grade ${markingResult.grade}`
-            );
-
-          } catch (studentError: any) {
-            const errorDetails = studentError.response?.data || studentError.message;
-            logger.error(`❌ Failed marking student ${sheet.studentId} in session ${id}:`, {
-              error: errorDetails,
-              studentId: sheet.studentId,
-              stack: studentError.stack
-            });
-            errors.push(`${sheet.studentId}: ${studentError.message}`);
-
-            const errMsg = studentError.message || String(errorDetails);
-            const truncatedErr = errMsg.substring(0, 500);
-
+          if (!studentAnswerText || studentAnswerText.trim().length < 5) {
+            logger.error(`Student ${sheet.studentId} — NO ANSWER TEXT AVAILABLE. Skipping.`);
             await (prisma as any).studentAnswerSheet.update({
               where: { id: sheet.id },
-              data: { 
-                status: 'ERROR',
-                errorMessage: truncatedErr
-               }
-            }).catch(() => {});
-
+              data: { status: 'SKIPPED', errorMessage: 'No extracted text available' }
+            });
             completed++;
+            return;
           }
-        })));
 
-        // Finalize session status in Supabase PostgreSQL
-        const finalStatus =
-          errors.length === answerSheets.length
-            ? 'ERROR'
-            : 'REVIEW_REQUIRED';
+          logger.info(`═══ PRE-MARKING CHECK for ${sheet.studentId} ═══`);
+          logger.info(`studentAnswerText variable: length=${studentAnswerText?.length || 0}`);
+          logger.info(`studentAnswerText preview: "${(studentAnswerText || '').substring(0, 200)}"`);
+          logger.info(`Using locked questions: ${parsedQuestions?.length || 0} found`);
+          logger.info(`Using locked mark scheme: ${parsedMarkScheme?.length || 0} found`);
+          logger.info(`═══════════════════════════════════`);
 
-        await (prisma as any).markingSession.update({
-          where: { id },
-          data: { status: finalStatus }
-        });
+          const markingResult = await markStudentAnswersWithConsensus(
+            studentAnswerText,
+            sheet.studentId,
+            parsedQuestions,
+            parsedMarkScheme,
+            session
+          );
 
-        // Final progress update
-        markingProgress.set(id, {
-          total: answerSheets.length,
-          completed: answerSheets.length,
-          currentStudentId: '',
-          currentStudentName: '',
-          status: 'COMPLETE',
-          estimatedSecondsRemaining: 0
-        });
+          await dbRetry(() => (prisma as any).studentResult.upsert({
+            where: { sessionId_studentId: { sessionId: id, studentId: sheet.studentId } },
+            create: {
+              sessionId: id,
+              studentId: sheet.studentId,
+              studentName: sheet.studentName,
+              studentCode: sheet.studentId,
+              answerPdfUrl: sheet.pdfUrl,
+              totalMarks: markingResult.totalMarks,
+              maxMarks: markingResult.maxMarks,
+              percentage: markingResult.percentage,
+              grade: markingResult.grade,
+              reviewed: false,
+              aiData: markingResult,
+              questions: {
+                create: markingResult.questions.map((q: any) => ({
+                  questionNumber: String(q.questionNumber),
+                  questionText: q.questionText || '',
+                  topic: q.topic || 'General',
+                  marksAwarded: Number(q.marksAwarded) || 0,
+                  marksAvailable: Number(q.marksAvailable) || 0,
+                  status: q.status || 'INCORRECT',
+                  studentAnswer: q.studentAnswer || '',
+                  expectedAnswer: q.expectedAnswer || '',
+                  aiFeedback: q.aiFeedback || '',
+                  lostMarksReason: q.lostMarksReason || null,
+                  improvementSuggestion: q.improvementSuggestion || '',
+                  aiConfidence: q.aiConfidence || 'High',
+                  consensusNote: q.consensusNote || null
+                }))
+              }
+            },
+            update: {
+              totalMarks: markingResult.totalMarks,
+              maxMarks: markingResult.maxMarks,
+              percentage: markingResult.percentage,
+              grade: markingResult.grade,
+              aiData: markingResult
+            }
+          }));
 
-        logger.info(
-          `🎓 Marking complete for session ${id}. ` +
-          `Success: ${completed - errors.length} ` +
-          `Errors: ${errors.length}`
-        );
+          await dbRetry(() => (prisma as any).studentAnswerSheet.update({
+            where: { id: sheet.id },
+            data: { status: 'MARKED' }
+          }));
 
-        // Send email via Resend
-        try {
-          await resend.emails.send({
-            from: 'MarkAI <notifications@markai.edu>',
-            to: 'lecturer@institution.edu',
-            subject: `✅ Marking Complete — ${session.name}`,
-            text: `
-  Marking is complete for "${session.name}".
-  Successfully marked: ${completed - errors.length}
-  Errors: ${errors.length}
-  ${errors.length > 0
-    ? `\nFailed:\n${errors.join('\n')}`
-    : ''
-  }
-  Log in to MarkAI to review results.`.trim()
+          completed++;
+
+          logger.info(
+            `✅ ${sheet.studentId}: ` +
+            `${markingResult.totalMarks}/${markingResult.maxMarks} ` +
+            `Grade ${markingResult.grade}`
+          );
+
+        } catch (studentError: any) {
+          logger.error(`🚨 Marking FAILED for student ${sheet.studentId}:`, {
+            message: studentError.message,
+            stack: studentError.stack
           });
-        } catch (e) {
-          logger.error('Email failed:', e);
-        }
+          errors.push(`${sheet.studentId}: ${studentError.message}`);
 
-      })();
+          await (prisma as any).studentAnswerSheet.update({
+            where: { id: sheet.id },
+            data: { status: 'ERROR', errorMessage: studentError.message }
+          }).catch(() => {});
+
+          completed++;
+        }
+      })));
+
+      if (errors.length === answerSheets.length && answerSheets.length > 0) {
+        throw new Error(`All ${answerSheets.length} students failed to mark. First error: ${errors[0]}`);
+      }
+
+      await (prisma as any).markingSession.update({
+        where: { id },
+        data: {
+          status: 'REVIEW_REQUIRED',
+          errorMessage: errors.length > 0 ? `${errors.length} student(s) had errors: ${errors.slice(0, 3).join('; ')}` : null
+        }
+      });
+
+      markingProgress.set(id, {
+        total: answerSheets.length,
+        completed: answerSheets.length,
+        currentStudentId: '',
+        currentStudentName: '',
+        status: 'COMPLETE',
+        estimatedSecondsRemaining: 0
+      });
+
+      logger.info(`═══ MARKING COMPLETE for session ${id}: ${completed - errors.length} succeeded, ${errors.length} failed ═══`);
+
+      try {
+        await resend.emails.send({
+          from: 'MarkAI <notifications@markai.edu>',
+          to: 'lecturer@institution.edu',
+          subject: `✅ Marking Complete — ${session.name}`,
+          text: `
+Marking is complete for "${session.name}".
+Successfully marked: ${completed - errors.length}
+Errors: ${errors.length}
+${errors.length > 0
+  ? `\nFailed:\n${errors.join('\n')}`
+  : ''
+}
+Log in to MarkAI to review results.`.trim()
+        });
+      } catch (e) {
+        logger.error('Email failed:', e);
+      }
+
+    } catch (sessionError: any) {
+      logger.error(`🚨🚨 MARKING SESSION ${id} FAILED ENTIRELY:`, {
+        message: sessionError.message,
+        stack: sessionError.stack
+      });
+
+      await (prisma as any).markingSession.update({
+        where: { id },
+        data: {
+          status: 'ERROR',
+          errorMessage: sessionError.message || 'Unknown error during marking'
+        }
+      });
+
+      markingProgress.set(id, {
+        total: 0, completed: 0, currentStudentId: '', currentStudentName: '',
+        status: 'ERROR', estimatedSecondsRemaining: 0
+      });
+    } finally {
+      markingProgress.delete(id);
+    }
+  }
+
+  app.post('/api/sessions/:id/retry-marking', authMiddleware, requireLecturer, async (req, res) => {
+    try {
+      const { id } = req.params;
+
+      const session = await (prisma as any).markingSession.findUnique({ where: { id } });
+      if (!session) return res.status(404).json({ error: 'Session not found' });
+
+      if (!session.parsedQuestions || !session.parsedMarkScheme) {
+        return res.status(400).json({ error: 'Cannot retry — paper structure was never successfully locked. Try re-creating the session.' });
+      }
+
+      // Reset state before retrying
+      await (prisma as any).markingSession.update({
+        where: { id },
+        data: { status: 'MARKING', errorMessage: null }
+      });
+
+      await (prisma as any).studentAnswerSheet.updateMany({
+        where: { sessionId: id, status: 'ERROR' },
+        data: { status: 'PENDING', errorMessage: null }
+      });
+
+      // Clear any partial results from the failed attempt so retry starts clean
+      await (prisma as any).studentResult.deleteMany({ where: { sessionId: id } });
+
+      res.json({ status: 'MARKING', message: 'Retry started' });
+
+      // Re-run the same background marking logic
+      triggerBackgroundMarking(id);
 
     } catch (error: any) {
-      logger.error('Marking route error:', error);
+      logger.error('Retry marking error:', error);
       res.status(500).json({ error: error.message });
     }
   });

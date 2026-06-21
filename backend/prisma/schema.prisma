@@ -98,6 +98,7 @@ model MarkingSession {
   markingStrictness   String               @default("Standard")
   feedbackDetail      String               @default("Detailed")
   status              String               @default("PENDING")
+  errorMessage        String?
   createdAt           DateTime             @default(now())
 
   class        Class?               @relation(fields: [classId], references: [id])

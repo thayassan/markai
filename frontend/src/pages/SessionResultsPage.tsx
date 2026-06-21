@@ -105,16 +105,14 @@ const SessionResultsPage = () => {
     setIsMarking(true);
     setMarkingError('');
     try {
-      const resetRes = await apiFetch(`/api/sessions/${id}/retry-failed`, {
+      const res = await apiFetch(`/api/sessions/${id}/retry-marking`, {
         method: 'POST'
       });
-      if (!resetRes.ok) {
-        const errData = await resetRes.json();
-        throw new Error(errData.error || 'Failed to reset failed sheets before retrying');
+      const data = await res.json();
+      if (!res.ok) {
+        throw new Error(data.error || 'Could not retry marking');
       }
-      
-      // Then proceed to normal marking
-      await handleStartMarking();
+      queryClient.invalidateQueries({ queryKey: ['session', id] });
     } catch (error: any) {
       setMarkingError(error.message);
       setIsMarking(false);
@@ -304,15 +302,16 @@ const SessionResultsPage = () => {
                  {isMarking ? 'Starting...' : 'Start AI Marking'}
                </button>
              )}
-             {session?.status === 'ERROR' && (
-               <button 
-                 onClick={handleRetryMarking} 
-                 disabled={isMarking}
-                 className="btn-primary flex items-center gap-2 text-xs bg-red-600 hover:bg-red-700"
-               >
-                 <RotateCw size={14} /> Retry Marking
-               </button>
-             )}
+              {session?.status === 'ERROR' && (
+                <button 
+                  onClick={handleRetryMarking} 
+                  disabled={isMarking}
+                  className="btn-primary flex items-center gap-2 text-xs bg-red-600 hover:bg-red-700"
+                >
+                  <RotateCw size={14} className={isMarking ? 'animate-spin' : ''} />
+                  {isMarking ? 'Retrying...' : 'Retry Marking'}
+                </button>
+              )}
           </div>
         </div>
       </div>
@@ -368,6 +367,25 @@ const SessionResultsPage = () => {
             <div>
               <h3 className="text-sm font-bold text-red-700">Marking Failed</h3>
               <p className="text-xs text-red-600 mt-1">{markingError}</p>
+            </div>
+          </div>
+        </motion.div>
+      )}
+
+      {/* Session Server Error Banner */}
+      {session?.status === 'ERROR' && (
+        <motion.div 
+          initial={{ opacity: 0, y: -10 }}
+          animate={{ opacity: 1, y: 0 }}
+          className="card p-6 mb-8 border-2 border-red-200 bg-red-50/50"
+        >
+          <div className="flex items-center gap-4">
+            <AlertCircle size={24} className="text-red-500 shrink-0" />
+            <div>
+              <h3 className="text-sm font-bold text-red-700">Marking Failed (Server Error)</h3>
+              <p className="text-xs text-red-600 mt-1">
+                {session.errorMessage || 'An unknown error occurred during marking. Please try again or contact support.'}
+              </p>
             </div>
           </div>
         </motion.div>
