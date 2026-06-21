@@ -416,28 +416,30 @@ const SessionResultsPage = () => {
         {/* Grade Distribution */}
         <div className="lg:col-span-2 card p-8">
           <h3 className="text-sm font-bold text-navy uppercase tracking-[0.2em] mb-8">Grade Distribution</h3>
-          <div className="h-64">
-            {hasResults ? (
-              <ResponsiveContainer width="100%" height="100%">
-                <BarChart data={analytics?.gradeData}>
-                  <CartesianGrid strokeDasharray="3 3" vertical={false} stroke="#E2E8F0" />
-                  <XAxis 
-                    dataKey="name" 
-                    axisLine={false} 
-                    tickLine={false} 
-                    tick={{ fill: '#64748B', fontSize: 12, fontWeight: 700 }}
-                  />
-                  <YAxis hide />
-                  <RechartsTooltip cursor={{ fill: 'transparent' }} />
-                  <Bar dataKey="count" radius={[4, 4, 0, 0]}>
-                    {analytics?.gradeData.map((entry, index) => (
-                      <Cell key={`cell-${index}`} fill={entry.count > 0 ? '#2ECC9A' : '#F1F5F9'} />
-                    ))}
-                  </Bar>
-                </BarChart>
-              </ResponsiveContainer>
+          <div>
+            {analytics?.gradeData && analytics.gradeData.some(g => g.count > 0) ? (
+              <div style={{ width: '100%', height: 320 }}>
+                <ResponsiveContainer width="100%" height="100%">
+                  <BarChart data={analytics.gradeData}>
+                    <CartesianGrid strokeDasharray="3 3" vertical={false} stroke="#E2E8F0" />
+                    <XAxis 
+                      dataKey="name" 
+                      axisLine={false} 
+                      tickLine={false} 
+                      tick={{ fill: '#64748B', fontSize: 12, fontWeight: 700 }}
+                    />
+                    <YAxis hide />
+                    <RechartsTooltip cursor={{ fill: 'transparent' }} />
+                    <Bar dataKey="count" radius={[4, 4, 0, 0]}>
+                      {analytics.gradeData.map((entry, index) => (
+                        <Cell key={`cell-${index}`} fill={entry.count > 0 ? '#2ECC9A' : '#F1F5F9'} />
+                      ))}
+                    </Bar>
+                  </BarChart>
+                </ResponsiveContainer>
+              </div>
             ) : (
-              <div className="h-full flex flex-col items-center justify-center text-text-muted">
+              <div className="h-[320px] flex flex-col items-center justify-center text-text-muted">
                 <FileText size={40} className="mb-3 opacity-30" />
                 <p className="text-xs font-bold uppercase tracking-widest">No results yet</p>
                 <p className="text-[10px] mt-1">Start marking to see grade distribution</p>
@@ -450,23 +452,25 @@ const SessionResultsPage = () => {
         <div className="card p-8 bg-navy text-white overflow-hidden relative">
            <div className="absolute top-0 right-0 w-32 h-32 bg-accent/20 rounded-full blur-3xl -mr-16 -mt-16" />
            <h3 className="text-sm font-bold uppercase tracking-[0.2em] border-b border-white/10 pb-4 mb-4">Topic Performance</h3>
-           <div className="h-64">
+           <div>
              {analytics?.topicData && analytics.topicData.length >= 3 ? (
-               <ResponsiveContainer width="100%" height="100%">
-                 <RadarChart cx="50%" cy="50%" outerRadius="80%" data={analytics.topicData}>
-                   <PolarGrid stroke="rgba(255,255,255,0.1)" />
-                   <PolarAngleAxis dataKey="subject" tick={{ fill: 'rgba(255,255,255,0.5)', fontSize: 10 }} />
-                   <Radar
-                     name="Avg Score"
-                     dataKey="A"
-                     stroke="#2ECC9A"
-                     fill="#2ECC9A"
-                     fillOpacity={0.6}
-                   />
-                 </RadarChart>
-               </ResponsiveContainer>
+               <div style={{ width: '100%', height: 280 }}>
+                 <ResponsiveContainer width="100%" height="100%">
+                   <RadarChart cx="50%" cy="50%" outerRadius="80%" data={analytics.topicData}>
+                     <PolarGrid stroke="rgba(255,255,255,0.1)" />
+                     <PolarAngleAxis dataKey="subject" tick={{ fill: 'rgba(255,255,255,0.5)', fontSize: 10 }} />
+                     <Radar
+                       name="Avg Score"
+                       dataKey="A"
+                       stroke="#2ECC9A"
+                       fill="#2ECC9A"
+                       fillOpacity={0.6}
+                     />
+                   </RadarChart>
+                 </ResponsiveContainer>
+               </div>
              ) : (
-               <div className="h-full flex items-center justify-center opacity-40 text-xs italic">
+               <div className="h-[280px] flex items-center justify-center opacity-40 text-xs italic text-white/60">
                  Insufficient topic data for Radar overview.
                </div>
              )}

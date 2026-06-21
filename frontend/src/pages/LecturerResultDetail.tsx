@@ -2,7 +2,8 @@ import React, { useState, useMemo } from 'react';
 import { DashboardLayout } from '@/src/components/DashboardLayout';
 import { 
   ArrowLeft, Save, CheckCircle2, Download, AlertCircle, 
-  HelpCircle, MoreVertical, Loader2, RefreshCcw, Sparkles 
+  HelpCircle, MoreVertical, Loader2, RefreshCcw, Sparkles,
+  RefreshCw, AlertTriangle, CheckCircle
 } from 'lucide-react';
 import { Link, useParams } from 'react-router-dom';
 import { motion, AnimatePresence } from 'motion/react';
@@ -190,23 +191,30 @@ const LecturerResultDetail = () => {
             </div>
          </div>
 
-         <div className="card p-6 bg-bg flex flex-col items-center justify-center border-dashed border-2 border-border gap-2">
-            <button 
-               onClick={() => reEvaluateMutation.mutate()}
-               disabled={reEvaluateMutation.isPending}
-               className="flex items-center gap-2 text-text-muted hover:text-navy transition-all text-xs font-bold uppercase tracking-widest"
+         <div className="flex flex-col justify-between h-full">
+            <button
+              onClick={() => reEvaluateMutation.mutate()}
+              disabled={reEvaluateMutation.isPending}
+              className="w-full h-full min-h-[140px] flex flex-col items-center justify-center gap-2 rounded-xl bg-navy text-white border-2 border-navy hover:bg-navy/90 hover:shadow-lg transition-all disabled:opacity-60 disabled:cursor-not-allowed"
             >
-               {reEvaluateMutation.isPending ? <Loader2 size={14} className="animate-spin" /> : <RefreshCcw size={14} />}
-               {reEvaluateMutation.isPending ? 'Re-evaluating...' : 'Re-evaluate with AI'}
+              <RefreshCw size={20} className={reEvaluateMutation.isPending ? 'animate-spin' : ''} />
+              <span className="text-sm font-semibold">
+                {reEvaluateMutation.isPending ? 'Re-evaluating...' : 'Re-evaluate with AI'}
+              </span>
+              <span className="text-xs text-white/60 font-normal">
+                Re-checks this score for accuracy
+              </span>
             </button>
             {comparisonResult && (
-              <div className={cn(
-                "mt-2 p-2 rounded-lg text-[10px] text-center w-full font-bold",
-                comparisonResult.changed ? 'bg-amber-50 text-amber-700 border border-amber-200' : 'bg-green-50 text-green-700 border border-green-200'
-              )}>
+              <div className={`mt-3 px-3 py-2.5 rounded-lg text-xs font-medium flex items-center gap-2 ${
+                comparisonResult.changed
+                  ? 'bg-amber-100 text-amber-800 border border-amber-300'
+                  : 'bg-green-100 text-green-800 border border-green-300'
+              }`}>
+                {comparisonResult.changed ? <AlertTriangle size={14} /> : <CheckCircle size={14} />}
                 {comparisonResult.changed
-                  ? `⚠️ Score changed: ${comparisonResult.previousTotal} → ${comparisonResult.newTotal}`
-                  : `✓ Consistent: scored ${comparisonResult.newTotal} both times`}
+                  ? `Score changed: ${comparisonResult.previousTotal} → ${comparisonResult.newTotal}`
+                  : `Consistent: scored ${comparisonResult.newTotal} both times`}
               </div>
             )}
          </div>
