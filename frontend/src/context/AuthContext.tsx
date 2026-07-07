@@ -1,9 +1,9 @@
-import React, { createContext, useContext, useState, useEffect } from 'react';
+import React, { createContext, useContext, useState, useEffect, useMemo, useCallback, useRef } from 'react';
 import { useNavigate, useLocation } from 'react-router-dom';
 import { safeGetItem, safeSetItem, safeRemoveItem } from '../lib/storage';
 import { apiFetch } from '../lib/api';
 
-type Role = 'STUDENT' | 'LECTURER' | 'ADMIN';
+type Role = 'STUDENT' | 'LECTURER' | 'ADMIN' | 'SCHOOL_ADMIN';
 
 interface User {
   id: string;
@@ -36,6 +36,15 @@ export const AuthProvider: React.FC<{ children: React.ReactNode }> = ({ children
   const [user, setUser] = useState<User | null>(null);
   const [isLoading, setIsLoading] = useState(true);
   const navigate = useNavigate();
+  const lastNavigatedPathRef = useRef<string | null>(null);
+
+  const safeNavigate = useCallback((targetPath: string, options?: any) => {
+    const currentPath = window.location.pathname;
+    if (targetPath !== lastNavigatedPathRef.current && targetPath !== currentPath) {
+      lastNavigatedPathRef.current = targetPath;
+      navigate(targetPath, options);
+    }
+  }, [navigate]);
 
   useEffect(() => {
     const verifySession = async () => {
@@ -90,7 +99,7 @@ export const AuthProvider: React.FC<{ children: React.ReactNode }> = ({ children
       console.warn('AuthContext: Unauthorized event received, logging out');
       setUser(null);
       if (window.location.pathname !== '/login') {
-        navigate('/login', { replace: true });
+        safeNavigate('/login', { replace: true });
       }
     };
 
@@ -100,9 +109,9 @@ export const AuthProvider: React.FC<{ children: React.ReactNode }> = ({ children
     return () => {
       window.removeEventListener('markai-unauthorized', handleUnauthorized);
     };
-  }, [navigate]);
+  }, [safeNavigate]);
 
-  const login = async (email: string, password?: string) => {
+  const login = useCallback(async (email: string, password?: string) => {
     console.log('AuthContext: Attempting login for:', email);
     try {
       const response = await fetch('/api/auth/login', {
@@ -131,30 +140,37 @@ export const AuthProvider: React.FC<{ children: React.ReactNode }> = ({ children
       
       const targetPath = loggedInUser.userType === 'STUDENT' ? '/dashboard' : 
                          loggedInUser.userType === 'LECTURER' ? '/lecturer/dashboard' : 
-                         loggedInUser.userType === 'ADMIN' ? '/admin/dashboard' : '/';
+                         (loggedInUser.userType === 'ADMIN' || loggedInUser.userType === 'SCHOOL_ADMIN') ? '/admin/dashboard' : '/';
       
       if (window.location.pathname !== targetPath) {
-        navigate(targetPath, { replace: true });
+        safeNavigate(targetPath, { replace: true });
       }
 
     } catch (error) {
       console.error('Login error:', error);
       throw error;
     }
-  };
+  }, [safeNavigate]);
 
-  const logout = () => {
+  const logout = useCallback(() => {
     setUser(null);
     safeRemoveItem('markai_user');
     safeRemoveItem('markai_token');
     
     if (window.location.pathname !== '/') {
-      navigate('/', { replace: true });
+      safeNavigate('/', { replace: true });
     }
-  };
+  }, [safeNavigate]);
+
+  const contextValue = useMemo(() => ({
+    user,
+    login,
+    logout,
+    isLoading
+  }), [user, login, logout, isLoading]);
 
   return (
-    <AuthContext.Provider value={{ user, login, logout, isLoading }}>
+    <AuthContext.Provider value={contextValue}>
       {children}
     </AuthContext.Provider>
   );

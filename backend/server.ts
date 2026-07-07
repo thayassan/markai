@@ -1608,6 +1608,49 @@ Q2: [transcribed answer]
     }
   });
 
+  app.patch('/api/sessions/:id', authMiddleware, requireLecturer, async (req: any, res) => {
+    const { id } = req.params;
+    try {
+      const session = await (prisma as any).markingSession.update({
+        where: { id },
+        data: {
+          questionPdfUrl: req.body.questionPdfUrl,
+          markSchemePdfUrl: req.body.markSchemePdfUrl,
+          questionTextUrl: req.body.questionTextUrl,
+          markSchemeTextUrl: req.body.markSchemeTextUrl,
+          markingStrictness: req.body.markingStrictness,
+          feedbackDetail: req.body.feedbackDetail,
+          status: req.body.status
+        }
+      });
+      logger.info(`Session ${id} updated: questionTextUrl: ${session.questionTextUrl}, markSchemeTextUrl: ${session.markSchemeTextUrl}`);
+      res.json(session);
+    } catch (error: any) {
+      logger.error(`Failed to update session ${id}:`, error.message);
+      res.status(500).json({ error: 'Failed to update session' });
+    }
+  });
+
+  app.post('/api/sessions/:id/upload-question-paper', authMiddleware, async (req: any, res) => {
+    try {
+      const { id } = req.params;
+      const { fileUrl, textUrl, text } = req.body;
+
+      await (prisma as any).markingSession.update({
+        where: { id },
+        data: {
+          questionTextUrl: textUrl,
+          questionPdfUrl: fileUrl
+        }
+      });
+
+      logger.info(`Session ${id}: questionTextUrl committed to DB: ${textUrl}`);
+      res.json({ fileUrl, textUrl, text });
+    } catch (error: any) {
+      res.status(500).json({ error: error.message });
+    }
+  });
+
   app.post('/api/sessions/:id/answer-sheets', authMiddleware, requireLecturer, async (req, res) => {
     try {
       const { id } = req.params;
@@ -1706,6 +1749,15 @@ Q2: [transcribed answer]
         return res.status(404).json({ error: 'Session not found' });
       }
 
+      // GUARD — if textUrl isn't in DB yet, the upload hasn't committed fully
+      if (!session.questionTextUrl || !session.markSchemeTextUrl) {
+        logger.error(`Session ${id} parse-paper called but textUrls not in DB yet. questionTextUrl=${session.questionTextUrl}, markSchemeTextUrl=${session.markSchemeTextUrl}`);
+        return res.status(400).json({
+          error: 'Question paper or mark scheme text is not ready yet. Please wait a moment and try again.',
+          retryable: true
+        });
+      }
+
       // If already parsed and locked, return the existing structure — never re-parse silently
       if (session.parsedQuestions && session.parsedMarkScheme) {
         return res.json({
@@ -1731,7 +1783,21 @@ Q2: [transcribed answer]
         await parseQuestionPaperAndMarkScheme(questionPdfText, markSchemeText);
 
       if (!parsedQuestions || parsedQuestions.length === 0) {
-        return res.status(400).json({ error: 'Failed to extract any questions from the question paper.' });
+        const rawTextLength = questionPdfText?.length || 0;
+        const likelyReason = rawTextLength < 100
+          ? 'The question paper PDF appears to contain no extractable text — it may be a scanned image-only PDF. Try uploading a text-based PDF instead.'
+          : 'The AI could not identify a question structure in the extracted text. Check that the uploaded file is the question paper and not another document.';
+
+        logger.error(`Session ${id}: parse returned 0 questions. Raw text length: ${rawTextLength}`);
+        logger.error(`Raw text preview: "${questionPdfText?.substring(0, 300)}"`);
+
+        return res.status(400).json({
+          error: likelyReason,
+          needsManualMarks: false,
+          questions: [],
+          rawTextLength,
+          rawTextPreview: questionPdfText?.substring(0, 200)
+        });
       }
 
       const totalMaxMarks = parsedQuestions.reduce(

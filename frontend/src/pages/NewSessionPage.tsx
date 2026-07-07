@@ -3,7 +3,7 @@ import { DashboardLayout } from '@/src/components/DashboardLayout';
 import { 
   Upload, FileText, Check, ArrowRight, X, Zap, 
   Loader2, Plus, Trash2, LayoutGrid, Users,
-  CheckCircle2, AlertCircle, AlertTriangle, TrendingUp, Target, Award, Calendar, ChevronRight, ArrowUpRight, BarChart2,
+  CheckCircle, CheckCircle2, AlertCircle, AlertTriangle, TrendingUp, Target, Award, Calendar, ChevronRight, ArrowUpRight, BarChart2,
   Sparkles, BookOpen, Hash, Clock, Layers, Globe
 } from 'lucide-react';
 import { motion, AnimatePresence } from 'motion/react';
@@ -184,13 +184,16 @@ const NewSessionPage = () => {
   const [markingErrorMessage, setMarkingErrorMessage] = useState<string | null>(null);
   const [sessionId, setSessionId] = useState('');
   const [isParsingPaper, setIsParsingPaper] = useState(false);
+  const [parseStatus, setParseStatus] = useState<
+    'idle' | 'parsing' | 'success' | 'failed' | 'needs_manual'
+  >('idle');
+  const [parseError, setParseError] = useState<string | null>(null);
+  const [manualQuestions, setManualQuestions] = useState<any[]>([]);
   const [paperStructure, setPaperStructure] = useState<{
-    totalMaxMarks: number | null;
+    totalMaxMarks: number;
     questionCount: number;
     mismatchWarning: string | null;
   } | null>(null);
-  const [needsManualMarks, setNeedsManualMarks] = useState(false);
-  const [manualQuestions, setManualQuestions] = useState<any[]>([]);
 
   // Errors
   const [errors, setErrors] = useState<Record<string, string>>({});
@@ -245,6 +248,19 @@ const NewSessionPage = () => {
     sessionDetails.examBoard,
     sessionDetails.courseId
   ]);
+
+  useEffect(() => {
+    // Only trigger parsing once both papers are fully uploaded
+    // and their textUrls are confirmed returned from the server
+    const questionReady = questionPaper?.textUrl && questionPaper?.uploaded;
+    const markSchemeReady = markScheme?.textUrl && markScheme?.uploaded;
+
+    if (currentStep === 4 && questionReady && markSchemeReady && parseStatus === 'idle') {
+      // Small delay to ensure DB write has settled before hitting parse-paper
+      const timer = setTimeout(() => parsePaperStructure(), 500);
+      return () => clearTimeout(timer);
+    }
+  }, [currentStep, questionPaper?.textUrl, markScheme?.textUrl, parseStatus]);
 
   // --- Handlers ---
 
@@ -500,6 +516,24 @@ const NewSessionPage = () => {
         const session = await sessionRes.json();
         activeSessionId = session.id;
         setSessionId(session.id);
+      } else {
+        // UPDATE the session with current files/details so they are committed before parsing
+        const payload = {
+          questionPdfUrl: questionPaper.fileUrl || '',
+          markSchemePdfUrl: markScheme.fileUrl || '',
+          questionTextUrl: questionPaper.textUrl || '',
+          markSchemeTextUrl: markScheme.textUrl || '',
+          markingStrictness,
+          feedbackDetail
+        };
+        const sessionRes = await apiFetch(`/api/sessions/${activeSessionId}`, {
+          method: 'PATCH',
+          body: JSON.stringify(payload)
+        });
+        if (!sessionRes.ok) {
+          const errData = await sessionRes.json();
+          throw new Error(errData.error || 'Failed to update session');
+        }
       }
 
       // 2. Save all answer sheets metadata
@@ -537,34 +571,95 @@ const NewSessionPage = () => {
       });
       if (!sheetsRes.ok) throw new Error('Failed to upload answer sheets metadata');
 
-      // 3. Parse paper structure and lock it
-      setNeedsManualMarks(false);
-      const parseRes = await apiFetch(`/api/sessions/${activeSessionId}/parse-paper`, {
+      // 3. Set step to 4 (the useEffect will pick it up and trigger parsing with delay)
+      setCurrentStep(4);
+    } catch (error: any) {
+      alert(error.message || 'Error processing session. Please try again.');
+    } finally {
+      setIsParsingPaper(false);
+    }
+  };
+
+  const parsePaperStructure = async (targetId?: string, retryCount = 0) => {
+    const activeId = targetId || sessionId;
+    if (!activeId) return;
+
+    setParseStatus('parsing');
+    setParseError(null);
+
+    try {
+      const res = await apiFetch(`/api/sessions/${activeId}/parse-paper`, {
         method: 'POST'
       });
-      const parseData = await parseRes.json();
+      const data = await res.json();
 
-      if (!parseRes.ok) {
-        if (parseData.needsManualMarks) {
-          setNeedsManualMarks(true);
-          setManualQuestions(parseData.questions.map((q: any) => ({ ...q, marksAvailable: 1 })));
-          setCurrentStep(4);
-          return;
+      if (!res.ok) {
+        // Retryable means the DB write hasn't settled yet — wait and retry
+        if (data.retryable && retryCount < 3) {
+          console.log(`Parse-paper retryable, attempt ${retryCount + 1}/3 after delay`);
+          await new Promise(resolve => setTimeout(resolve, 2000));
+          return parsePaperStructure(activeId, retryCount + 1);
         }
-        throw new Error(parseData.error || 'Failed to parse question paper structure');
+
+        // Backend returned a structured error
+        if (data.needsManualMarks && data.questions?.length > 0) {
+          // Questions found but no marks detected — show manual marks entry
+          setManualQuestions(
+            data.questions.map((q: any) => ({ ...q, marksAvailable: 2 }))
+          );
+          setParseStatus('needs_manual');
+        } else {
+          // Complete parse failure — no questions extracted at all
+          setParseError(
+            data.error ||
+            'Could not extract questions from the question paper. The PDF may be image-based, scanned, or in an unsupported format.'
+          );
+          setParseStatus('failed');
+        }
+        return;
+      }
+
+      // Success
+      setPaperStructure({
+        totalMaxMarks: data.totalMaxMarks,
+        questionCount: data.questions?.length || 0,
+        mismatchWarning: data.mismatchWarning || null
+      });
+      setParseStatus('success');
+
+    } catch (error: any) {
+      setParseError('Network error while parsing paper. Please check your connection and try again.');
+      setParseStatus('failed');
+    }
+  };
+
+  const handleConfirmManualMarks = async () => {
+    if (!sessionId) return;
+
+    setParseStatus('parsing');
+    try {
+      const res = await apiFetch(`/api/sessions/${sessionId}/confirm-manual-marks`, {
+        method: 'POST',
+        body: JSON.stringify({ questions: manualQuestions })
+      });
+      const data = await res.json();
+
+      if (!res.ok) {
+        setParseError(data.error || 'Failed to save manual marks');
+        setParseStatus('failed');
+        return;
       }
 
       setPaperStructure({
-        totalMaxMarks: parseData.totalMaxMarks,
-        questionCount: parseData.questions?.length || 0,
-        mismatchWarning: parseData.mismatchWarning || null
+        totalMaxMarks: data.totalMaxMarks,
+        questionCount: manualQuestions.length,
+        mismatchWarning: null
       });
+      setParseStatus('success');
 
-      setCurrentStep(4);
     } catch (error: any) {
-      alert(error.message || 'Error parsing paper structure. Please try again.');
-    } finally {
-      setIsParsingPaper(false);
+      setParseError('Failed to save. Please try again.');
+      setParseStatus('failed');
     }
   };
 
@@ -775,9 +870,8 @@ const NewSessionPage = () => {
 
   // --- Rendering ---
 
-  const hasEmptyAnswers = studentSheets
-    .filter(s => s.uploaded)
-    .some(s => !s.extractedText || s.extractedText.trim().length < 5);
+  const uploadedSheets = studentSheets.filter(s => s.uploaded);
+  const hasEmptyAnswers = uploadedSheets.some(s => !s.extractedText || s.extractedText.trim().length < 5);
 
   return (
     <DashboardLayout>
@@ -1358,78 +1452,6 @@ const NewSessionPage = () => {
             >
               {/* Left Column: Summary */}
               <div className="space-y-6">
-                {needsManualMarks && (
-                  <div className="p-6 bg-amber-50/80 border border-amber-200 rounded-2xl mb-4 relative overflow-hidden backdrop-blur-sm">
-                    <p className="text-sm font-semibold text-amber-800 mb-1 flex items-center gap-1.5 font-serif">
-                      <AlertTriangle size={16} className="text-amber-600" />
-                      Couldn't detect mark values automatically
-                    </p>
-                    <p className="text-xs text-amber-700/80 mb-4 leading-relaxed">
-                      Please enter the marks for each question below — this only needs to be done once and will be locked for the whole session.
-                    </p>
-
-                    <div className="max-h-60 overflow-y-auto pr-2">
-                      <table className="w-full text-xs">
-                        <thead>
-                          <tr className="text-left text-amber-800 border-b border-amber-200/50 pb-2">
-                            <th className="pb-2 font-bold uppercase tracking-wider text-[10px]">Q#</th>
-                            <th className="pb-2 font-bold uppercase tracking-wider text-[10px]">Question</th>
-                            <th className="pb-2 font-bold uppercase tracking-wider text-[10px] w-20">Marks</th>
-                          </tr>
-                        </thead>
-                        <tbody className="divide-y divide-amber-200/30">
-                          {manualQuestions.map((q, idx) => (
-                            <tr key={idx} className="hover:bg-amber-100/30 transition-colors">
-                              <td className="py-2 pr-2 font-bold text-amber-900">{q.questionNumber}</td>
-                              <td className="py-2 pr-4 text-amber-950/85 truncate max-w-[200px]" title={q.questionText}>{q.questionText}</td>
-                              <td className="py-2">
-                                <div className="relative">
-                                  <input
-                                    type="number"
-                                    min="0"
-                                    value={q.marksAvailable}
-                                    onChange={(e) => {
-                                      const updated = [...manualQuestions];
-                                      updated[idx].marksAvailable = Number(e.target.value);
-                                      setManualQuestions(updated);
-                                    }}
-                                    className="w-16 px-2 py-1 bg-white border border-amber-300 rounded text-xs font-bold text-amber-950 focus:outline-none focus:ring-2 focus:ring-amber-500"
-                                  />
-                                </div>
-                              </td>
-                            </tr>
-                          ))}
-                        </tbody>
-                      </table>
-                    </div>
-
-                    <button
-                      onClick={async () => {
-                        try {
-                          const res = await apiFetch(`/api/sessions/${sessionId}/confirm-manual-marks`, {
-                            method: 'POST',
-                            body: JSON.stringify({ questions: manualQuestions })
-                          });
-                          if (!res.ok) {
-                            throw new Error('Failed to save manual marks');
-                          }
-                          const data = await res.json();
-                          setNeedsManualMarks(false);
-                          setPaperStructure({
-                            totalMaxMarks: data.totalMaxMarks,
-                            questionCount: manualQuestions.length,
-                            mismatchWarning: null
-                          });
-                        } catch (e: any) {
-                          alert(e.message || 'Error saving marks');
-                        }
-                      }}
-                      className="mt-4 w-full py-2 bg-navy text-white text-xs font-bold rounded-xl hover:bg-navy/90 transition-all shadow-md shadow-navy/10 flex items-center justify-center gap-1.5"
-                    >
-                      <Check size={14} /> Confirm Marks & Lock Structure
-                    </button>
-                  </div>
-                )}
 
                 <div className="card p-6">
                   <h3 className="text-sm font-bold text-navy uppercase tracking-widest mb-6 pb-4 border-b border-border flex items-center gap-2">
@@ -1609,18 +1631,145 @@ const NewSessionPage = () => {
                   </div>
                 </div>
 
+                {/* Parse status display */}
+                {parseStatus === 'idle' && (
+                  <p className="text-xs text-slate-400 text-center">
+                    Paper structure will be analysed when you proceed.
+                  </p>
+                )}
+
+                {parseStatus === 'parsing' && (
+                  <div className="flex items-center justify-center gap-2 py-3">
+                    <Loader2 size={16} className="animate-spin text-navy" />
+                    <span className="text-sm text-slate-600">Analysing paper structure...</span>
+                  </div>
+                )}
+
+                {parseStatus === 'success' && paperStructure && (
+                  <div className="p-3 bg-green-50 border border-green-200 rounded-lg mb-3">
+                    <p className="text-xs font-semibold text-green-700 flex items-center gap-1.5 mb-1">
+                      <CheckCircle size={13} />
+                      Paper structure locked
+                    </p>
+                    <p className="text-sm text-green-700">
+                      {paperStructure.questionCount} questions · Total: {paperStructure.totalMaxMarks} marks
+                    </p>
+                    {paperStructure.mismatchWarning && (
+                      <p className="text-xs text-amber-600 mt-1.5 flex items-start gap-1.5">
+                        <AlertTriangle size={12} className="shrink-0 mt-0.5" />
+                        {paperStructure.mismatchWarning}
+                      </p>
+                    )}
+                  </div>
+                )}
+
+                {parseStatus === 'failed' && (
+                  <div className="p-4 bg-red-50 border border-red-200 rounded-lg mb-3">
+                    <p className="text-sm font-semibold text-red-700 flex items-center gap-1.5 mb-1">
+                      <AlertTriangle size={14} />
+                      Could not read question paper
+                    </p>
+                    <p className="text-xs text-red-600 mb-3">{parseError}</p>
+
+                    <div className="flex gap-2">
+                      <button
+                        onClick={() => parsePaperStructure()}
+                        className="text-xs px-3 py-1.5 bg-red-600 text-white rounded-md hover:bg-red-700"
+                      >
+                        Try Again
+                      </button>
+                      <button
+                        onClick={() => {
+                          // Enter manual mode with empty question list
+                          setManualQuestions([
+                            { questionNumber: 'Q1', questionText: '', marksAvailable: 5, topic: 'General' }
+                          ]);
+                          setParseStatus('needs_manual');
+                        }}
+                        className="text-xs px-3 py-1.5 border border-red-300 text-red-600 rounded-md hover:bg-red-50"
+                      >
+                        Enter Questions Manually
+                      </button>
+                    </div>
+
+                    <p className="text-xs text-red-500/70 mt-2">
+                      Common causes: scanned image-only PDF with no extractable text, password-protected PDF,
+                      or a PDF where marks are embedded in images rather than written as text.
+                    </p>
+                  </div>
+                )}
+
+                {parseStatus === 'needs_manual' && (
+                  <div className="p-4 bg-amber-50 border border-amber-200 rounded-lg mb-3">
+                    <p className="text-sm font-semibold text-amber-700 flex items-center gap-1.5 mb-1">
+                      <AlertTriangle size={14} />
+                      Enter marks manually
+                    </p>
+                    <p className="text-xs text-amber-600 mb-3">
+                      Questions were found but mark values couldn't be read automatically. Enter each question's marks below — this is saved permanently and won't need to be repeated.
+                    </p>
+
+                    <div className="space-y-2 mb-3 max-h-48 overflow-y-auto">
+                      {manualQuestions.map((q, idx) => (
+                        <div key={idx} className="flex items-center gap-2 bg-white p-2 rounded border border-amber-100">
+                          <span className="text-xs font-mono text-slate-500 w-8 shrink-0">{q.questionNumber}</span>
+                          <span className="text-xs text-slate-600 flex-1 truncate">{q.questionText?.substring(0, 60) || 'Question ' + (idx + 1)}</span>
+                          <div className="flex items-center gap-1 shrink-0">
+                            <span className="text-xs text-slate-400">/</span>
+                            <input
+                              type="number"
+                              min="0"
+                              max="100"
+                              value={q.marksAvailable}
+                              onChange={(e) => {
+                                const updated = [...manualQuestions];
+                                updated[idx] = { ...updated[idx], marksAvailable: Number(e.target.value) || 0 };
+                                setManualQuestions(updated);
+                              }}
+                              className="w-14 px-2 py-1 text-xs border border-amber-200 rounded text-center"
+                            />
+                            <span className="text-xs text-slate-400">marks</span>
+                          </div>
+                        </div>
+                      ))}
+                    </div>
+
+                    <div className="flex items-center justify-between">
+                      <span className="text-xs text-amber-600">
+                        Total: {manualQuestions.reduce((s, q) => s + (Number(q.marksAvailable) || 0), 0)} marks
+                      </span>
+                      <button
+                        onClick={handleConfirmManualMarks}
+                        disabled={manualQuestions.reduce((s, q) => s + q.marksAvailable, 0) === 0}
+                        className="text-xs px-4 py-1.5 bg-amber-600 text-white rounded-md hover:bg-amber-700 disabled:opacity-50"
+                      >
+                        Confirm & Lock
+                      </button>
+                    </div>
+                  </div>
+                )}
+
                 <div className="flex gap-4 pt-4">
                   <button onClick={() => setCurrentStep(3)} className="btn-ghost flex-1">Back</button>
-                  <button 
+                  <button
                     onClick={handleStartMarking}
-                    disabled={hasEmptyAnswers || needsManualMarks}
-                    className={cn(
-                       "btn-accent flex-1 flex items-center justify-center gap-2 shadow-lg shadow-accent/20 group transition-all",
-                       (hasEmptyAnswers || needsManualMarks) ? "opacity-50 cursor-not-allowed" : "hover:scale-[1.02]"
-                    )}
+                    disabled={
+                      parseStatus === 'parsing' ||
+                      uploadedSheets.some(s => !s.extractedText || s.extractedText.trim().length < 5)
+                    }
+                    className={`px-6 py-3 rounded-xl font-semibold text-sm transition-all flex-1 ${
+                      parseStatus === 'parsing'
+                        ? 'bg-slate-300 text-slate-500 cursor-not-allowed'
+                        : parseStatus === 'success'
+                        ? 'bg-accent text-navy hover:bg-accent/90'
+                        : 'bg-navy text-white hover:bg-navy/90'
+                    }`}
                   >
-                    <Zap size={20} fill="currentColor" className="group-hover:animate-pulse" /> 
-                    <span className="font-bold">Save & Start Marking</span>
+                    {parseStatus === 'parsing'
+                      ? 'Parsing Paper Structure...'
+                      : parseStatus === 'success'
+                      ? 'Save & Start Marking'
+                      : 'Continue Without Parsing'}
                   </button>
                 </div>
                 {hasEmptyAnswers && (
@@ -1628,7 +1777,7 @@ const NewSessionPage = () => {
                     Some students have no extracted text. Please go back and re-upload their answer sheets before starting.
                   </p>
                 )}
-                {needsManualMarks && (
+                {parseStatus === 'needs_manual' && (
                   <p className="text-xs text-amber-600 mt-2 text-center font-bold">
                     Marks could not be detected. Please confirm the manual marks structure above before starting.
                   </p>

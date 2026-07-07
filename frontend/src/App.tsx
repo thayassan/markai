@@ -1,5 +1,5 @@
 import React from 'react';
-import { BrowserRouter as Router, Routes, Route, Navigate } from 'react-router-dom';
+import { BrowserRouter as Router, Routes, Route, Navigate, useNavigate } from 'react-router-dom';
 import LandingPage from './pages/LandingPage';
 import LoginPage from './pages/LoginPage';
 import RegisterPage from './pages/RegisterPage';
@@ -29,6 +29,12 @@ const queryClient = new QueryClient({
 
 const AppRoutes = () => {
   const { user, isLoading } = useAuth();
+  const navigate = useNavigate();
+  const navigateRef = React.useRef(navigate);
+
+  React.useEffect(() => {
+    navigateRef.current = navigate;
+  }, [navigate]);
 
   React.useEffect(() => {
     console.log('[AppRoutes] State update:', { 
@@ -38,6 +44,13 @@ const AppRoutes = () => {
       isLoading 
     });
   }, [user, isLoading]);
+
+  const userEmail = user?.email;
+  React.useEffect(() => {
+    if (!isLoading && !userEmail && window.location.pathname !== '/' && window.location.pathname !== '/login' && window.location.pathname !== '/register') {
+      navigateRef.current('/login', { replace: true });
+    }
+  }, [isLoading, userEmail]);
 
   if (isLoading) {
     console.log('[AppRoutes] Authentication is initializing, showing spinner...');
@@ -100,7 +113,7 @@ const AppRoutes = () => {
       {/* Admin Routes */}
       <Route path="/admin/dashboard" element={
         !user ? <Navigate to="/login" replace /> :
-        user.userType === 'ADMIN' ? <AdminDashboard /> :
+        (user.userType === 'ADMIN' || user.userType === 'SCHOOL_ADMIN') ? <AdminDashboard /> :
         user.userType === 'STUDENT' ? <Navigate to="/dashboard" replace /> :
         <Navigate to="/lecturer/dashboard" replace />
       } />

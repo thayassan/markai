@@ -59,12 +59,23 @@ export class ErrorBoundary extends React.Component<Props, State> {
               </code>
             </div>
 
-            <button 
-              onClick={this.handleReset}
-              className="btn-primary w-full flex items-center justify-center gap-2 py-4"
-            >
-              <RefreshCw size={20} /> Try Again
-            </button>
+            <div className="flex flex-col sm:flex-row gap-4">
+              <button 
+                onClick={this.handleReset}
+                className="btn-primary flex-1 flex items-center justify-center gap-2 py-4"
+              >
+                <RefreshCw size={20} /> Try Again
+              </button>
+              <button 
+                onClick={() => {
+                  this.setState({ hasError: false, error: null });
+                  window.location.href = '/lecturer/dashboard';
+                }}
+                className="btn-secondary flex-1 py-4 border border-border rounded-xl font-medium text-navy hover:bg-bg flex items-center justify-center"
+              >
+                Back to Dashboard
+              </button>
+            </div>
           </div>
         </div>
       );
