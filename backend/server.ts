@@ -176,9 +176,9 @@ interface KeyState {
   label: string;
 }
 
-const GEMINI_MODEL = process.env.GEMINI_MODEL || 'gemini-2.0-flash';
-const RPM_LIMIT = 10;   // actual limit is 15 RPM, use 10 as safe margin
-const RPD_LIMIT = 195;  // actual limit is 200 RPD, use 195 as safe margin
+const GEMINI_MODEL = process.env.GEMINI_MODEL || 'gemini-3.1-flash-lite';
+const RPM_LIMIT = 13;   // 15 RPM actual, use 13 as safe margin
+const RPD_LIMIT = 480;  // 500 RPD actual, use 480 as safe margin
 
 class GeminiKeyPool {
   public keys: KeyState[] = []; // public so diagnostic endpoint can inspect it
