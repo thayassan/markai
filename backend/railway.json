@@ -1,5 +1,5 @@
 {
-  "$schema": "markai-production-b54c.up.railway.app",
+  "$schema": "markai-production-47ce.up.railway.app",
   "build": {
     "builder": "NIXPACKS",
     "buildCommand": "npm install && npx prisma generate && npm run build"
