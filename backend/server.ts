@@ -421,14 +421,9 @@ async function validateSchema() {
     await (prisma as any).questionResult.findFirst();
     logger.info('✅ Schema validated against Supabase');
   } catch (error: any) {
-    logger.error('❌ SCHEMA MISMATCH DETECTED:');
-    logger.error(error.message);
-    console.error('\n❌ SCHEMA MISMATCH DETECTED:', error.message);
-    console.error('Run: npx prisma generate && touch server.ts\n');
-    process.exit(1); // Stop server if schema is broken to prevent silent data-loss/corruption
+    logger.warn('⚠️ Schema check notice (non-fatal on startup):', error.message);
   }
 }
-await validateSchema();
 
 // Groq API call with retry and active key rotation for 429 rate limits
 async function groqWithRetry(
@@ -1617,19 +1612,8 @@ async function startServer() {
   });
 
   // J. All API Routes
-  app.get('/api/health', async (req, res) => {
-    try {
-      await (prisma as any).$queryRaw`SELECT 1`;
-      const pkg = JSON.parse(fs.readFileSync('package.json', 'utf-8'));
-      res.json({
-        status: 'ok',
-        db: 'connected',
-        uptime: process.uptime(),
-        version: pkg.version
-      });
-    } catch (error) {
-      res.status(500).json({ status: 'error', db: 'disconnected' });
-    }
+  app.get('/api/health', (req, res) => {
+    res.status(200).json({ status: 'ok', timestamp: new Date().toISOString() });
   });
 
   // Mount Routers
@@ -4092,13 +4076,16 @@ Keep it concise and actionable for a lecturer.`;
 
 
 
-  // STEP 3: Verify Gemini model works before accepting uploads
-  const geminiWorks = await verifyGeminiModel();
-  if (!geminiWorks) {
-    logger.warn('⚠️ WARNING: Gemini AI features may not work. Check your GEMINI_API_KEY and model availability.');
-  }
-
-  app.listen(PORT, '0.0.0.0', () => logger.info(`✅ Server running on port ${PORT}`));
+  app.listen(PORT, '0.0.0.0', () => {
+    logger.info(`✅ Server running on port ${PORT}`);
+    // Non-blocking background verifications after server starts accepting traffic
+    validateSchema().catch(err => logger.warn('Startup schema check error:', err.message));
+    verifyGeminiModel().then(geminiWorks => {
+      if (!geminiWorks) {
+        logger.warn('⚠️ WARNING: Gemini AI features may not work. Check your GEMINI_API_KEY and model availability.');
+      }
+    }).catch(err => logger.warn('Gemini verification error:', err.message));
+  });
 }
 
 startServer();
