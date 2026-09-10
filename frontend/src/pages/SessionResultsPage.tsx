@@ -63,20 +63,20 @@ const SessionResultsPage = () => {
   });
 
   // AI Insights Query
-  const { data: aiInsights, isLoading: aiLoading } = useQuery({
+  const { data: aiInsightsData, isLoading: aiLoading, refetch: refetchAiInsights } = useQuery({
     queryKey: ['sessionAiInsights', id],
     queryFn: async () => {
       const res = await apiFetch('/api/ai/generate', {
         method: 'POST',
-        body: JSON.stringify({
-          prompt: "Analyze this class performance data and provide a summary (Performance Summary, Areas for Improvement, Teaching Focus). Return clear sections.",
-          context: { session, results }
-        })
+        body: JSON.stringify({ sessionId: id })
       });
+      if (!res.ok) throw new Error(`HTTP ${res.status}`);
       const data = await res.json();
-      return data.text;
+      return data ?? { insights: null, fallback: true }; // never return undefined
     },
-    enabled: !!results && results.length > 0
+    enabled: !!results && results.length > 0,
+    retry: false,
+    staleTime: 5 * 60 * 1000
   });
 
   // Start marking handler
@@ -418,7 +418,7 @@ const SessionResultsPage = () => {
           <h3 className="text-sm font-bold text-navy uppercase tracking-[0.2em] mb-8">Grade Distribution</h3>
           <div>
             {analytics?.gradeData && analytics.gradeData.some(g => g.count > 0) ? (
-              <div style={{ width: '100%', height: 320 }}>
+              <div style={{ width: '100%', height: 280 }}>
                 <ResponsiveContainer width="100%" height="100%">
                   <BarChart data={analytics.gradeData}>
                     <CartesianGrid strokeDasharray="3 3" vertical={false} stroke="#E2E8F0" />
@@ -454,7 +454,7 @@ const SessionResultsPage = () => {
            <h3 className="text-sm font-bold uppercase tracking-[0.2em] border-b border-white/10 pb-4 mb-4">Topic Performance</h3>
            <div>
              {analytics?.topicData && analytics.topicData.length >= 3 ? (
-               <div style={{ width: '100%', height: 280 }}>
+               <div style={{ width: '100%', height: 300 }}>
                  <ResponsiveContainer width="100%" height="100%">
                    <RadarChart cx="50%" cy="50%" outerRadius="80%" data={analytics.topicData}>
                      <PolarGrid stroke="rgba(255,255,255,0.1)" />
@@ -613,10 +613,21 @@ const SessionResultsPage = () => {
                   </div>
                 ) : (
                   <div className="space-y-6">
-                     <div className="whitespace-pre-wrap text-sm text-navy leading-relaxed">
-                       {aiInsights || "No insights available for this session yet."}
-                     </div>
-                     <button className="btn-ghost w-full py-2 text-[10px] uppercase font-bold tracking-widest border border-border">
+                     {aiInsightsData?.insights ? (
+                       <div className="whitespace-pre-wrap text-sm text-navy leading-relaxed">
+                         {aiInsightsData.insights}
+                       </div>
+                     ) : (
+                       <p className="text-xs text-text-muted text-center py-4">
+                         {aiInsightsData?.fallback
+                           ? 'AI insights temporarily unavailable.'
+                           : 'Generating insights...'}
+                       </p>
+                     )}
+                     <button 
+                       onClick={() => refetchAiInsights()} 
+                       className="btn-ghost w-full py-2 text-[10px] uppercase font-bold tracking-widest border border-border"
+                     >
                        Regenerate Analysis
                      </button>
                   </div>

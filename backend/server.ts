@@ -3955,19 +3955,72 @@ Log in to MarkAI to review results.`.trim()
 
   app.post('/api/ai/generate', authMiddleware, async (req, res) => {
     try {
-      const { prompt, context } = req.body;
-      const fullPrompt = context ? `AI context: ${JSON.stringify(context)}. ${prompt}` : prompt;
-      const response = await groqWithRetry(fullPrompt);
-      res.json({ text: response.text, insights: response.text });
+      const { sessionId, prompt: customPrompt, context } = req.body;
+
+      if (sessionId) {
+        const session = await prisma.markingSession.findUnique({
+          where: { id: sessionId },
+          include: { results: { include: { questions: true } } }
+        });
+
+        if (!session || !session.results?.length) {
+          return res.status(200).json({ insights: null, text: null, fallback: true });
+        }
+
+        // Build a concise prompt from session data
+        const totalStudents = session.results.length;
+        const avgScore = session.results.reduce((s: number, r: any) => s + r.percentage, 0) / totalStudents;
+        const passRate = (session.results.filter((r: any) => r.percentage >= 50).length / totalStudents) * 100;
+
+        const prompt = `You are an educational data analyst. Analyse this exam session and provide insights.
+
+Session: ${session.name}
+Subject: ${session.subject}
+Students: ${totalStudents}
+Average Score: ${avgScore.toFixed(1)}%
+Pass Rate: ${passRate.toFixed(1)}%
+
+Provide a brief 3-paragraph analysis:
+1. Overall class performance summary
+2. Key strengths observed
+3. Areas needing improvement and recommendations
+
+Keep it concise and actionable for a lecturer.`;
+
+        const response = await callGeminiSafe(prompt, {
+          context: 'ai-insights',
+          temperature: 0.3
+        });
+
+        const insights = response.text || null;
+        return res.status(200).json({ insights, text: insights, fallback: false });
+      }
+
+      if (customPrompt) {
+        const fullPrompt = context ? `AI context: ${JSON.stringify(context)}. ${customPrompt}` : customPrompt;
+        try {
+          const response = await groqWithRetry(fullPrompt);
+          return res.status(200).json({ insights: response.text, text: response.text, fallback: false });
+        } catch {
+          const response = await callGeminiSafe(fullPrompt, {
+            context: 'ai-generate-fallback',
+            temperature: 0.3
+          });
+          return res.status(200).json({ insights: response.text, text: response.text, fallback: false });
+        }
+      }
+
+      return res.status(200).json({ insights: null, text: null, fallback: true });
+
     } catch (error: any) {
-      logger.error('/api/ai/generate error:', error?.message || error);
-      // Return 200 with null so the frontend degrades gracefully
-      // instead of crashing the TanStack query with undefined or 500
+      logger.error('/api/ai/generate error:', error.message);
+      // NEVER return 500 — always return 200 with null insights
+      // so the TanStack query doesn't crash with undefined
       return res.status(200).json({
-        text: null,
         insights: null,
+        text: null,
         fallback: true,
-        error: 'AI insights temporarily unavailable'
+        errorHint: error.message?.substring(0, 100)
       });
     }
   });
