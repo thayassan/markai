@@ -1,7 +1,7 @@
 import React, { useState } from 'react';
 import { Link, useNavigate } from 'react-router-dom';
 import { motion } from 'motion/react';
-import { Eye, EyeOff, Mail, Lock, Globe, AlertCircle } from 'lucide-react';
+import { Eye, EyeOff, Mail, Lock, AlertCircle } from 'lucide-react';
 import { cn } from '@/src/lib/utils';
 import { useAuth } from '../context/AuthContext';
 
@@ -158,19 +158,6 @@ const LoginPage = () => {
 
             <button type="submit" disabled={isLoggingIn} className="btn-primary w-full disabled:opacity-50 disabled:cursor-not-allowed active:scale-[0.98]">
               {isLoggingIn ? 'Signing in...' : `Sign in as ${userType.toLowerCase().replace('_', ' ')}`}
-            </button>
-
-            <div className="relative py-4">
-              <div className="absolute inset-0 flex items-center"><div className="w-full border-t border-border"></div></div>
-              <div className="relative flex justify-center text-xs uppercase tracking-widest"><span className="bg-white px-4 text-text-muted">Or continue with</span></div>
-            </div>
-
-            <button 
-              type="button" 
-              onClick={() => alert("Google login is not implemented in this demo. Please use the email login.")}
-              className="w-full py-3 border border-border rounded-button flex items-center justify-center gap-3 hover:bg-bg transition-colors font-medium text-navy"
-            >
-              <Globe size={18} /> Google Account
             </button>
           </form>
 

@@ -1656,6 +1656,138 @@ async function startServer() {
   });
 
   // Mount Routers
+  app.get('/api/admin/dashboard-stats', authMiddleware, async (req, res) => {
+    try {
+      const userId = (req as any).user?.id || (req as any).userId;
+      const user = await (prisma as any).user.findUnique({
+        where: { id: userId },
+        select: { universityId: true, userType: true }
+      });
+
+      if (!user || (user.userType !== 'SCHOOL_ADMIN' && user.userType !== 'ADMIN')) {
+        return res.status(403).json({ error: 'Not authorized or no university linked' });
+      }
+
+      let universityId = user.universityId;
+      if (!universityId) {
+        const firstUni = await (prisma as any).university.findFirst();
+        universityId = firstUni?.id || null;
+      }
+
+      const now = new Date();
+      const monthStart = new Date(now.getFullYear(), now.getMonth(), 1);
+
+      const uniUserFilter = universityId ? { universityId } : {};
+      const uniSessionFilter = universityId ? { lecturer: { universityId } } : {};
+
+      // Total students at this university
+      const totalStudents = await (prisma as any).user.count({
+        where: { ...uniUserFilter, userType: 'STUDENT' }
+      });
+
+      // Total lecturers at this university
+      const totalLecturers = await (prisma as any).user.count({
+        where: { ...uniUserFilter, userType: 'LECTURER' }
+      });
+
+      // Sessions this month by lecturers at this university
+      const sessionsThisMonth = await (prisma as any).markingSession.count({
+        where: {
+          createdAt: { gte: monthStart },
+          ...uniSessionFilter
+        }
+      });
+
+      // University average score across all sessions
+      const allResults = await (prisma as any).studentResult.findMany({
+        where: { session: uniSessionFilter },
+        select: { percentage: true }
+      });
+
+      const universityAvg = allResults.length > 0
+        ? allResults.reduce((s: number, r: any) => s + r.percentage, 0) / allResults.length
+        : 0;
+
+      // Performance trend — last 6 months
+      const trend = [];
+      for (let i = 5; i >= 0; i--) {
+        const start = new Date(now.getFullYear(), now.getMonth() - i, 1);
+        const end = new Date(now.getFullYear(), now.getMonth() - i + 1, 0, 23, 59, 59);
+        const monthResults = await (prisma as any).studentResult.findMany({
+          where: {
+            createdAt: { gte: start, lte: end },
+            session: uniSessionFilter
+          },
+          select: { percentage: true }
+        });
+        const avg = monthResults.length > 0
+          ? monthResults.reduce((s: number, r: any) => s + r.percentage, 0) / monthResults.length
+          : 0;
+        trend.push({
+          month: start.toLocaleString('default', { month: 'short' }),
+          avg: Math.round(avg * 10) / 10,
+          count: monthResults.length
+        });
+      }
+
+      // Course ID comparison
+      const courseResults = await (prisma as any).markingSession.findMany({
+        where: uniSessionFilter,
+        include: { results: { select: { percentage: true } } }
+      });
+
+      const courseMap: Record<string, number[]> = {};
+      courseResults.forEach((session: any) => {
+        const cid = session.courseId || session.subject || 'General';
+        if (!courseMap[cid]) courseMap[cid] = [];
+        session.results.forEach((r: any) => courseMap[cid].push(r.percentage));
+      });
+
+      const courseComparison = Object.entries(courseMap).map(([courseId, percentages]) => ({
+        courseId,
+        avg: Math.round(percentages.reduce((s, p) => s + p, 0) / percentages.length * 10) / 10,
+        students: percentages.length
+      })).sort((a, b) => b.avg - a.avg);
+
+      // Faculty lecturers list
+      const lecturers = await (prisma as any).user.findMany({
+        where: { ...uniUserFilter, userType: 'LECTURER' },
+        select: {
+          id: true,
+          fullName: true,
+          role: true,
+          department: true,
+          createdAt: true,
+          _count: { select: { markingSessions: true } }
+        },
+        orderBy: { createdAt: 'desc' }
+      });
+
+      res.json({
+        stats: {
+          totalStudents,
+          totalLecturers,
+          sessionsThisMonth,
+          universityAvg: Math.round(universityAvg * 10) / 10
+        },
+        trend,
+        courseComparison,
+        lecturers: lecturers.map((l: any) => ({
+          id: l.id,
+          name: l.fullName,
+          role: l.role || 'Lecturer',
+          department: l.department || '—',
+          classes: l._count?.markingSessions || 0,
+          joined: l.createdAt.toISOString().split('T')[0]
+        }))
+      });
+
+    } catch (error: any) {
+      logger.error('Admin dashboard stats error:', error);
+      res.status(500).json({ error: error.message });
+    }
+  });
+
   app.use('/api/admin', adminRouter);
   app.use('/api', profileRouter);
 

@@ -119,7 +119,7 @@ export const requireAdmin = (
   next: express.NextFunction
 ) => {
   const userType = ((req as any).user?.userType || (req as any).user?.role || '').toUpperCase();
-  if (userType !== 'ADMIN') {
+  if (userType !== 'ADMIN' && userType !== 'SCHOOL_ADMIN') {
     return res.status(403).json({
       error: 'Admin access required',
       yourType: userType

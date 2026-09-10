@@ -152,27 +152,27 @@ export const Footer = () => {
         <div>
           <h4 className="font-serif font-bold mb-6 text-white">Product</h4>
           <ul className="space-y-4 text-sm text-gray-300">
-            <li><a href="#features" className="hover:text-white transition-colors">Features</a></li>
-            <li><a href="#" className="hover:text-white transition-colors">Pricing</a></li>
-            <li><a href="#" className="hover:text-white transition-colors">AI Marking</a></li>
+            <li><Link to="/features" className="hover:text-white transition-colors">Features</Link></li>
+            <li><Link to="/pricing" className="hover:text-white transition-colors">Pricing</Link></li>
+            <li><Link to="/lecturer/sessions/new" className="hover:text-white transition-colors">AI Marking</Link></li>
           </ul>
         </div>
 
         <div>
           <h4 className="font-serif font-bold mb-6 text-white">Support</h4>
           <ul className="space-y-4 text-sm text-gray-300">
-            <li><a href="#" className="hover:text-white transition-colors">Help Center</a></li>
-            <li><a href="#" className="hover:text-white transition-colors">API Docs</a></li>
-            <li><a href="#" className="hover:text-white transition-colors">Contact</a></li>
+            <li><a href="mailto:support@markai.demo" className="hover:text-white transition-colors">Help Center</a></li>
+            <li><Link to="/docs" className="hover:text-white transition-colors">API Docs</Link></li>
+            <li><a href="mailto:contact@markai.demo" className="hover:text-white transition-colors">Contact</a></li>
           </ul>
         </div>
 
         <div>
           <h4 className="font-serif font-bold mb-6 text-white">Company</h4>
           <ul className="space-y-4 text-sm text-gray-300">
-            <li><a href="#" className="hover:text-white transition-colors">About Us</a></li>
-            <li><a href="#" className="hover:text-white transition-colors">Careers</a></li>
-            <li><a href="#" className="hover:text-white transition-colors">Privacy</a></li>
+            <li><Link to="/about" className="hover:text-white transition-colors">About Us</Link></li>
+            <li><Link to="/careers" className="hover:text-white transition-colors">Careers</Link></li>
+            <li><Link to="/privacy" className="hover:text-white transition-colors">Privacy</Link></li>
           </ul>
         </div>
       </div>
@@ -180,8 +180,8 @@ export const Footer = () => {
       <div className="max-w-7xl mx-auto px-6 mt-20 pt-8 border-t border-white/10 flex flex-col md:flex-row justify-between items-center gap-4 text-xs text-gray-300 uppercase tracking-widest">
         <p>© 2026 MarkAI Technologies. All rights reserved.</p>
         <div className="flex gap-8">
-          <a href="#" className="hover:text-white transition-colors">Terms of Service</a>
-          <a href="#" className="hover:text-white transition-colors">Privacy Policy</a>
+          <Link to="/terms" className="hover:text-white transition-colors">Terms of Service</Link>
+          <Link to="/privacy" className="hover:text-white transition-colors">Privacy Policy</Link>
         </div>
       </div>
     </footer>

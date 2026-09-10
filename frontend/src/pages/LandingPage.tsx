@@ -85,7 +85,7 @@ const LandingPage = () => {
             <div className="card bg-white/10 backdrop-blur-xl border-white/20 p-8 animate-float" style={{ WebkitBackdropFilter: 'blur(20px)' }}>
               <div className="flex justify-between items-start mb-8">
                 <div>
-                  <h3 className="text-white font-serif text-xl mb-1">Student: Fatima A.</h3>
+                  <h3 className="text-white font-serif text-xl mb-1">Student: Aisha R.</h3>
                   <p className="text-white/50 text-sm">IB Biology — Paper 2</p>
                 </div>
                 <div className="text-right">

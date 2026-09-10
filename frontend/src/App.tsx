@@ -13,6 +13,13 @@ import SettingsPage from './pages/SettingsPage';
 import LecturerSessionsPage from './pages/LecturerSessionsPage';
 import StudentResultDetail from './pages/StudentResultDetail';
 import ProgressPage from './pages/ProgressPage';
+import FeaturesPage from './pages/FeaturesPage';
+import PricingPage from './pages/PricingPage';
+import AboutPage from './pages/AboutPage';
+import PrivacyPage from './pages/PrivacyPage';
+import TermsPage from './pages/TermsPage';
+import CareersPage from './pages/CareersPage';
+import DocsPage from './pages/DocsPage';
 import { NotFoundPage } from './pages/ErrorPages';
 import { ErrorBoundary } from './components/ErrorBoundary';
 import { AuthProvider, useAuth } from './context/AuthContext';
@@ -46,8 +53,9 @@ const AppRoutes = () => {
   }, [user, isLoading]);
 
   const userEmail = user?.email;
+  const publicPaths = ['/', '/login', '/register', '/features', '/pricing', '/about', '/privacy', '/terms', '/careers', '/docs'];
   React.useEffect(() => {
-    if (!isLoading && !userEmail && window.location.pathname !== '/' && window.location.pathname !== '/login' && window.location.pathname !== '/register') {
+    if (!isLoading && !userEmail && !publicPaths.includes(window.location.pathname)) {
       navigateRef.current('/login', { replace: true });
     }
   }, [isLoading, userEmail]);
@@ -73,6 +81,15 @@ const AppRoutes = () => {
       <Route path="/register" element={
         user ? <Navigate to="/" replace /> : <RegisterPage />
       } />
+      
+      {/* Public Pages */}
+      <Route path="/features" element={<FeaturesPage />} />
+      <Route path="/pricing" element={<PricingPage />} />
+      <Route path="/about" element={<AboutPage />} />
+      <Route path="/privacy" element={<PrivacyPage />} />
+      <Route path="/terms" element={<TermsPage />} />
+      <Route path="/careers" element={<CareersPage />} />
+      <Route path="/docs" element={<DocsPage />} />
       
       {/* Student Routes */}
       <Route path="/dashboard" element={

@@ -42,7 +42,14 @@ const AdminDashboard = () => {
   // Fetch Dashboard Data
   const { data: dashboardData, isLoading: dashboardLoading, refetch: refetchDashboard } = useQuery({
     queryKey: ['adminDashboard'],
-    queryFn: () => apiFetch('/api/admin/dashboard').then(res => res.json())
+    queryFn: async () => {
+      const res = await apiFetch('/api/admin/dashboard-stats');
+      if (!res.ok) {
+        const legacy = await apiFetch('/api/admin/dashboard');
+        return legacy.json();
+      }
+      return res.json();
+    }
   });
 
   // Fetch Invitations
@@ -88,33 +95,36 @@ const AdminDashboard = () => {
     setTimeout(() => setShowToast(false), 5000);
   };
 
+  const avgVal = dashboardData?.stats?.universityAvg ?? dashboardData?.stats?.universityAverage ?? 0;
   const stats = [
     { label: 'Total Students', value: dashboardData?.stats?.totalStudents?.toLocaleString() || '0', icon: Users, color: 'navy' },
     { label: 'Total Lecturers', value: dashboardData?.stats?.totalLecturers?.toLocaleString() || '0', icon: GraduationCap, color: 'accent' },
     { label: 'Sessions (Month)', value: dashboardData?.stats?.sessionsThisMonth?.toString() || '0', icon: FileText, color: 'gold' },
-    { label: 'University Avg.', value: `${Math.round(dashboardData?.stats?.universityAverage || 0)}%`, icon: TrendingUp, color: 'navy' },
+    { label: 'University Avg.', value: `${Math.round(avgVal * 10) / 10}%`, icon: TrendingUp, color: 'navy' },
   ];
 
-  const lineLabels = dashboardData?.trends?.map((t: any) => t.month) || ['-', '-', '-', '-', '-', '-'];
+  const trendData = dashboardData?.trend || dashboardData?.trends || [];
+  const lineLabels = trendData.length > 0 ? trendData.map((t: any) => t.month) : ['-', '-', '-', '-', '-', '-'];
   const lineData = {
     labels: lineLabels,
     datasets: [
       {
         label: 'University Avg. Score',
-        data: dashboardData?.trends?.map((t: any) => Math.round(t.avg)) || [0, 0, 0, 0, 0, 0],
+        data: trendData.length > 0 ? trendData.map((t: any) => Math.round(t.avg)) : [0, 0, 0, 0, 0, 0],
         borderColor: '#0f2a4a',
         tension: 0.4,
       },
     ],
   };
 
-  const barLabels = dashboardData?.courseComparison?.map((c: any) => c.subject) || ['No Data'];
+  const courseData = dashboardData?.courseComparison || [];
+  const barLabels = courseData.length > 0 ? courseData.map((c: any) => c.courseId || c.subject || 'Course') : ['No Data'];
   const barData = {
     labels: barLabels,
     datasets: [
       {
         label: 'Avg. Score',
-        data: dashboardData?.courseComparison?.map((c: any) => Math.round(c.avg)) || [0],
+        data: courseData.length > 0 ? courseData.map((c: any) => Math.round(c.avg)) : [0],
         backgroundColor: '#2ecc9a',
         borderRadius: 4,
       },
@@ -134,10 +144,10 @@ const AdminDashboard = () => {
     });
   };
 
-  const staffData = dashboardData?.staff || [];
+  const staffData = dashboardData?.lecturers || dashboardData?.staff || [];
   const filteredStaff = staffData.filter((staff: any) => 
-    staff.name.toLowerCase().includes(searchTerm.toLowerCase()) ||
-    staff.dept.toLowerCase().includes(searchTerm.toLowerCase())
+    (staff.name || '').toLowerCase().includes(searchTerm.toLowerCase()) ||
+    (staff.department || staff.dept || '').toLowerCase().includes(searchTerm.toLowerCase())
   );
 
   const isLoading = dashboardLoading || invitesLoading;
@@ -153,8 +163,8 @@ const AdminDashboard = () => {
     )
   }
 
-  const hasTrendData = dashboardData?.trends && dashboardData.trends.some((t: any) => t.avg > 0);
-  const hasComparisonData = dashboardData?.courseComparison && dashboardData.courseComparison.length > 0;
+  const hasTrendData = trendData.length > 0 && trendData.some((t: any) => t.avg > 0 || (t.count && t.count > 0));
+  const hasComparisonData = courseData.length > 0;
 
   return (
     <DashboardLayout>
