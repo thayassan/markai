@@ -1,5 +1,8 @@
 import React from 'react';
-import { BrowserRouter as Router, Routes, Route, Navigate, useNavigate } from 'react-router-dom';
+import { BrowserRouter as Router, Routes, Route, Navigate, useNavigate, useLocation } from 'react-router-dom';
+import { AnimatePresence } from 'framer-motion';
+import PageTransition from './components/PageTransition';
+import NavigationProgress from './components/NavigationProgress';
 import LandingPage from './pages/LandingPage';
 import LoginPage from './pages/LoginPage';
 import RegisterPage from './pages/RegisterPage';
@@ -37,6 +40,7 @@ const queryClient = new QueryClient({
 const AppRoutes = () => {
   const { user, isLoading } = useAuth();
   const navigate = useNavigate();
+  const location = useLocation();
   const navigateRef = React.useRef(navigate);
 
   React.useEffect(() => {
@@ -73,82 +77,84 @@ const AppRoutes = () => {
   }
 
   return (
-    <Routes>
-      <Route path="/" element={<LandingPage />} />
-      <Route path="/login" element={
-        user ? <Navigate to="/" replace /> : <LoginPage />
-      } />
-      <Route path="/register" element={
-        user ? <Navigate to="/" replace /> : <RegisterPage />
-      } />
-      
-      {/* Public Pages */}
-      <Route path="/features" element={<FeaturesPage />} />
-      <Route path="/pricing" element={<PricingPage />} />
-      <Route path="/about" element={<AboutPage />} />
-      <Route path="/privacy" element={<PrivacyPage />} />
-      <Route path="/terms" element={<TermsPage />} />
-      <Route path="/careers" element={<CareersPage />} />
-      <Route path="/docs" element={<DocsPage />} />
-      
-      {/* Student Routes */}
-      <Route path="/dashboard" element={
-        !user ? <Navigate to="/login" replace /> :
-        user.userType === 'STUDENT' ? <StudentDashboard /> :
-        user.userType === 'LECTURER' ? <Navigate to="/lecturer/dashboard" replace /> :
-        <Navigate to="/admin/dashboard" replace />
-      } />
-      
-      {/* Lecturer Routes */}
-      <Route path="/lecturer/dashboard" element={
-        !user ? <Navigate to="/login" replace /> :
-        user.userType === 'LECTURER' ? <LecturerDashboard /> :
-        user.userType === 'STUDENT' ? <Navigate to="/dashboard" replace /> :
-        <Navigate to="/admin/dashboard" replace />
-      } />
-      <Route path="/lecturer/sessions" element={
-        !user ? <Navigate to="/login" replace /> :
-        user.userType === 'LECTURER' ? <LecturerSessionsPage /> :
-        <Navigate to="/404" replace />
-      } />
-      <Route path="/lecturer/sessions/new" element={
-        !user ? <Navigate to="/login" replace /> :
-        user.userType === 'LECTURER' ? <NewSessionPage /> :
-        <Navigate to="/404" replace />
-      } />
-      <Route path="/lecturer/sessions/:id" element={
-        !user ? <Navigate to="/login" replace /> :
-        user.userType === 'LECTURER' ? <SessionResultsPage /> :
-        <Navigate to="/404" replace />
-      } />
-      <Route path="/lecturer/sessions/:id/students/:studentId" element={
-        !user ? <Navigate to="/login" replace /> :
-        user.userType === 'LECTURER' ? <LecturerResultDetail /> :
-        <Navigate to="/404" replace />
-      } />
-      
-      {/* Admin Routes */}
-      <Route path="/admin/dashboard" element={
-        !user ? <Navigate to="/login" replace /> :
-        (user.userType === 'ADMIN' || user.userType === 'SCHOOL_ADMIN') ? <AdminDashboard /> :
-        user.userType === 'STUDENT' ? <Navigate to="/dashboard" replace /> :
-        <Navigate to="/lecturer/dashboard" replace />
-      } />
-      
-      <Route path="/student/results/:id" element={
-        !user ? <Navigate to="/login" replace /> :
-        user.userType === 'STUDENT' ? <StudentResultDetail /> :
-        <Navigate to="/404" replace />
-      } />
-      
-      {/* Shared Routes */}
-      <Route path="/progress" element={user ? <ProgressPage /> : <Navigate to="/login" replace />} />
-      <Route path="/settings" element={user ? <SettingsPage /> : <Navigate to="/login" replace />} />
-      
-      {/* 404 */}
-      <Route path="/404" element={<NotFoundPage />} />
-      <Route path="*" element={<Navigate to="/404" replace />} />
-    </Routes>
+    <AnimatePresence mode="wait">
+      <Routes location={location} key={location.pathname}>
+        <Route path="/" element={<PageTransition><LandingPage /></PageTransition>} />
+        <Route path="/login" element={
+          user ? <Navigate to="/" replace /> : <PageTransition><LoginPage /></PageTransition>
+        } />
+        <Route path="/register" element={
+          user ? <Navigate to="/" replace /> : <PageTransition><RegisterPage /></PageTransition>
+        } />
+        
+        {/* Public Pages */}
+        <Route path="/features" element={<PageTransition><FeaturesPage /></PageTransition>} />
+        <Route path="/pricing" element={<PageTransition><PricingPage /></PageTransition>} />
+        <Route path="/about" element={<PageTransition><AboutPage /></PageTransition>} />
+        <Route path="/privacy" element={<PageTransition><PrivacyPage /></PageTransition>} />
+        <Route path="/terms" element={<PageTransition><TermsPage /></PageTransition>} />
+        <Route path="/careers" element={<PageTransition><CareersPage /></PageTransition>} />
+        <Route path="/docs" element={<PageTransition><DocsPage /></PageTransition>} />
+        
+        {/* Student Routes */}
+        <Route path="/dashboard" element={
+          !user ? <Navigate to="/login" replace /> :
+          user.userType === 'STUDENT' ? <PageTransition><StudentDashboard /></PageTransition> :
+          user.userType === 'LECTURER' ? <Navigate to="/lecturer/dashboard" replace /> :
+          <Navigate to="/admin/dashboard" replace />
+        } />
+        
+        {/* Lecturer Routes */}
+        <Route path="/lecturer/dashboard" element={
+          !user ? <Navigate to="/login" replace /> :
+          user.userType === 'LECTURER' ? <PageTransition><LecturerDashboard /></PageTransition> :
+          user.userType === 'STUDENT' ? <Navigate to="/dashboard" replace /> :
+          <Navigate to="/admin/dashboard" replace />
+        } />
+        <Route path="/lecturer/sessions" element={
+          !user ? <Navigate to="/login" replace /> :
+          user.userType === 'LECTURER' ? <PageTransition><LecturerSessionsPage /></PageTransition> :
+          <Navigate to="/404" replace />
+        } />
+        <Route path="/lecturer/sessions/new" element={
+          !user ? <Navigate to="/login" replace /> :
+          user.userType === 'LECTURER' ? <PageTransition><NewSessionPage /></PageTransition> :
+          <Navigate to="/404" replace />
+        } />
+        <Route path="/lecturer/sessions/:id" element={
+          !user ? <Navigate to="/login" replace /> :
+          user.userType === 'LECTURER' ? <PageTransition><SessionResultsPage /></PageTransition> :
+          <Navigate to="/404" replace />
+        } />
+        <Route path="/lecturer/sessions/:id/students/:studentId" element={
+          !user ? <Navigate to="/login" replace /> :
+          user.userType === 'LECTURER' ? <PageTransition><LecturerResultDetail /></PageTransition> :
+          <Navigate to="/404" replace />
+        } />
+        
+        {/* Admin Routes */}
+        <Route path="/admin/dashboard" element={
+          !user ? <Navigate to="/login" replace /> :
+          (user.userType === 'ADMIN' || user.userType === 'SCHOOL_ADMIN') ? <PageTransition><AdminDashboard /></PageTransition> :
+          user.userType === 'STUDENT' ? <Navigate to="/dashboard" replace /> :
+          <Navigate to="/lecturer/dashboard" replace />
+        } />
+        
+        <Route path="/student/results/:id" element={
+          !user ? <Navigate to="/login" replace /> :
+          user.userType === 'STUDENT' ? <PageTransition><StudentResultDetail /></PageTransition> :
+          <Navigate to="/404" replace />
+        } />
+        
+        {/* Shared Routes */}
+        <Route path="/progress" element={user ? <PageTransition><ProgressPage /></PageTransition> : <Navigate to="/login" replace />} />
+        <Route path="/settings" element={user ? <PageTransition><SettingsPage /></PageTransition> : <Navigate to="/login" replace />} />
+        
+        {/* 404 */}
+        <Route path="/404" element={<PageTransition><NotFoundPage /></PageTransition>} />
+        <Route path="*" element={<Navigate to="/404" replace />} />
+      </Routes>
+    </AnimatePresence>
   );
 };
 
@@ -158,6 +164,7 @@ export default function App() {
       <QueryClientProvider client={queryClient}>
         <Router>
           <AuthProvider>
+            <NavigationProgress />
             <AppRoutes />
           </AuthProvider>
         </Router>
