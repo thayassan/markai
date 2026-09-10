@@ -86,6 +86,30 @@ export async function downloadTextFromSupabase(
   return text;
 }
 
+// Download PDF file from Supabase Storage
+export async function downloadPdfFromSupabase(
+  filePath: string
+): Promise<Buffer> {
+  if (filePath.startsWith('http://') || filePath.startsWith('https://')) {
+    const resp = await fetch(filePath);
+    if (!resp.ok) throw new Error(`HTTP ${resp.status} downloading PDF from ${filePath}`);
+    const buf = await resp.arrayBuffer();
+    return Buffer.from(buf);
+  }
+
+  const cleanPath = filePath.replace(/^markai-pdfs\//, '');
+  const { data, error } = await supabase.storage
+    .from('markai-pdfs')
+    .download(cleanPath);
+
+  if (error || !data) {
+    throw new Error(`PDF download failed: ${error?.message || 'No data returned'}`);
+  }
+
+  const arrayBuffer = await data.arrayBuffer();
+  return Buffer.from(arrayBuffer);
+}
+
 // Get signed URL for stored file (1 hour expiry)
 export async function getSignedFileUrl(filePath: string): Promise<string> {
   const { data, error } = await supabase.storage

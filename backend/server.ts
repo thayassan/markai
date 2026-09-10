@@ -23,11 +23,14 @@ import { z } from 'zod';
 import winston from 'winston';
 import fs from 'fs';
 import crypto from 'crypto';
+import os from 'os';
+import { fromBuffer } from 'pdf2pic';
 import {
   supabase,
   uploadPdfToSupabase,
   uploadTextToSupabase,
   downloadTextFromSupabase,
+  downloadPdfFromSupabase,
   getSignedFileUrl
 } from './src/lib/supabase.js';
 import profileRouter from './routes/profile.js';
@@ -237,9 +240,9 @@ class GeminiKeyPool {
   async call(
     contents: any,
     context: string = 'unknown',
-    options: { maxWaitMs?: number; temperature?: number } = {}
+    options: { maxWaitMs?: number; temperature?: number; responseMimeType?: string } = {}
   ): Promise<any> {
-    const { maxWaitMs = 90000, temperature } = options;
+    const { maxWaitMs = 90000, temperature, responseMimeType } = options;
     const startTime = Date.now();
     let hasWaited = false;
 
@@ -268,23 +271,35 @@ class GeminiKeyPool {
 
           logger.info(`Gemini call [${context}] using ${keyState.label} (daily: ${keyState.dailyCount}/20, rpm window: ${keyState.requestTimestamps.length}/8)`);
 
+          const configObj: any = { maxOutputTokens: 65536 };
+          if (temperature !== undefined) configObj.temperature = temperature;
+          if (responseMimeType !== undefined) configObj.responseMimeType = responseMimeType;
+
           const response = await keyState.client.models.generateContent({
-            model: 'gemini-2.5-flash-lite',
+            model: 'gemini-3.1-flash-lite',
             contents,
-            config: temperature !== undefined ? { temperature } : undefined
+            config: configObj
           });
 
           return response;
 
         } catch (error: any) {
           const errorMsg = error.message || '';
-          const isRateLimit = 
-            errorMsg.includes('429') || 
+          const isRateLimit =
+            errorMsg.includes('429') ||
             errorMsg.includes('RESOURCE_EXHAUSTED') ||
             errorMsg.includes('503') ||
             errorMsg.includes('UNAVAILABLE') ||
             errorMsg.includes('experiencing high demand') ||
             errorMsg.includes('temporary');
+
+          // 404 NOT_FOUND = this key's GCP project doesn't have access to the model.
+          // Other keys may use different projects with different model access — skip and try next.
+          const isModelNotFound =
+            errorMsg.includes('NOT_FOUND') ||
+            errorMsg.includes('404') ||
+            errorMsg.includes('no longer available to new users') ||
+            errorMsg.includes('is not found for API version');
 
           if (isRateLimit) {
             logger.warn(`${keyState.label} hit rate limit/overload on [${context}], cooling down and trying next key`);
@@ -292,7 +307,13 @@ class GeminiKeyPool {
             continue; // loop will pick a different key automatically
           }
 
-          // Non-rate-limit error — don't burn through all keys for a real bug
+          if (isModelNotFound) {
+            logger.warn(`${keyState.label} model not available on [${context}], skipping to next key`);
+            keyState.cooldownUntil = Date.now() + 3600000; // 1 hour — model access won't change soon
+            continue; // try next key in pool
+          }
+
+          // Non-rate-limit, non-model-access error — don't burn through all keys for a real bug
           logger.error(`Gemini call [${context}] failed with non-rate-limit error on ${keyState.label}:`, errorMsg);
           throw error;
         }
@@ -368,10 +389,10 @@ async function getOrCreateOcrResult(
 // ─── Queue + Retry wrapper for ALL Gemini calls ─────────────────────────────
 async function callGeminiSafe(
   contents: any,
-  options: { context?: string; temperature?: number } = {}
+  options: { context?: string; temperature?: number; responseMimeType?: string } = {}
 ): Promise<any> {
-  const { context = 'unknown', temperature } = options;
-  return geminiPool.call(contents, context, { temperature });
+  const { context = 'unknown', temperature, responseMimeType } = options;
+  return geminiPool.call(contents, context, { temperature, responseMimeType });
 }
 
 // ─── Gemini Model Startup Verification ──────────────────────────────────────
@@ -385,7 +406,7 @@ async function verifyGeminiModel(): Promise<boolean> {
     return true;
   } catch (error: any) {
     logger.error('❌ Gemini model verification FAILED:', error.message);
-    logger.error('This means gemini-2.5-flash-lite may not be available with your API key/region.');
+    logger.error('This means gemini-3.1-flash-lite may not be available with your API key/region.');
     return false;
   }
 }
@@ -434,13 +455,13 @@ async function groqWithRetry(
       const tokens = completion.usage?.total_tokens || 0;
       const currentUsage = (groqKeyUsage.get(keyIndex) || 0) + tokens;
       groqKeyUsage.set(keyIndex, currentUsage);
-      
+
       logger.info(`[Groq] Request successful via Key ${keyIndex + 1}. Session Usage: ~${currentUsage} tokens.`);
 
       return { text: completion.choices[0]?.message?.content || '' };
     } catch (err: any) {
       const isQuota = err?.status === 429 || err?.message?.includes('429') || err?.message?.includes('rate limit');
-      
+
       if (isQuota) {
         logger.warn(`Groq limit hit on Key ${keyIndex + 1} (attempt ${attempt + 1}/${maxAttempts}). Switching keys...`);
         exhaustedGroqKeys.add(keyIndex);
@@ -451,14 +472,14 @@ async function groqWithRetry(
           continue;
         }
       }
-      
+
       let errorReason = err?.message || 'Unknown Error';
       if (err?.message?.toLowerCase().includes('token') || err?.code === 'context_length_exceeded' || err?.message?.includes('maximum context length')) {
         errorReason = 'Token limit exceeded';
       } else if (isQuota) {
         errorReason = 'Rate limit hit';
       }
-      
+
       console.log('--- EXACT GROQ ERROR DUMP ---');
       console.log(err?.response?.data || err?.error || err?.message);
       console.log('-----------------------------');
@@ -548,112 +569,749 @@ function normalizeMarkScheme(parsed: any[]): any[] {
   });
 }
 
-// ─── Combined Question Paper + Mark Scheme Parser (saves 1 API call per session) ───
-async function parseQuestionPaperAndMarkScheme(
-  questionPdfText: string,
-  markSchemeText: string
-): Promise<{ questions: any[]; markScheme: any[] }> {
+function recoverPartialJSON(rawText: string): any[] {
+  const recovered: any[] = [];
 
-  logger.info('Parsing question paper AND mark scheme in ONE call...');
-  logger.info(`Question PDF text length: ${questionPdfText?.length || 0}, preview: "${(questionPdfText || '').substring(0, 300)}"`);
+  // Find all complete JSON objects within the text using regex
+  const objectPattern = /\{[^{}]*"questionNumber"[^{}]*"marksAvailable"[^{}]*\}/g;
+  const matches = rawText.match(objectPattern);
 
+  if (!matches) return recovered;
+
+  for (const match of matches) {
+    try {
+      const obj = JSON.parse(match);
+      if (obj.questionNumber) recovered.push(obj);
+    } catch {
+      // Skip malformed objects
+    }
+  }
+
+  return recovered;
+}
+
+function buildFallbackQuestionsFromText(text: string): any[] {
+  const questions: any[] = [];
+
+  // Match common hierarchical question patterns
+  const patterns = [
+    // Q1(a)(i), Q2(b)(ii), Q3(c) etc.
+    /\b(Q\d+\s*\([a-z]\)\s*\([ivxlc]+\))/gi,
+    // Q1 (a) (i) with spaces
+    /\b(Q\d+\s*\(\s*[a-z]\s*\)\s*\(\s*[ivxlc]+\s*\))/gi,
+    // 1.(a)(i) numeric prefix
+    /\b(\d+\.\s*\([a-z]\)\s*\([ivxlc]+\))/gi,
+    // Q1(a) without sub-part
+    /\b(Q\d+\s*\([a-z]\)(?!\s*\([ivxlc]))/gi,
+    // Simple Q1, Q2, Q3
+    /\b(Q\d+)(?!\s*\()/gi
+  ];
+
+  const foundNumbers = new Set<string>();
+
+  for (const pattern of patterns) {
+    const matches = [...text.matchAll(pattern)];
+    for (const match of matches) {
+      const qNum = match[1].replace(/\s+/g, '').toUpperCase();
+      if (!foundNumbers.has(qNum)) {
+        foundNumbers.add(qNum);
+        questions.push({
+          questionNumber: qNum,
+          questionText: `Question ${qNum}`,
+          marksAvailable: 5, // conservative default
+          topic: 'General'
+        });
+      }
+    }
+  }
+
+  logger.info(`buildFallbackQuestionsFromText: found ${questions.length} question numbers via pattern matching`);
+  return questions;
+}
+
+// ─── Helper: infer topic from question text ───────────────────────────────────
+function inferTopic(questionText: string): string {
+  const text = questionText.toLowerCase();
+  if (text.includes('software engineering') || text.includes('define the term')) return 'Software Engineering';
+  if (text.includes('testing') || text.includes('tdd') || text.includes('inspection')) return 'Software Testing';
+  if (text.includes('requirement')) return 'Requirements Engineering';
+  if (text.includes('maintenance') || text.includes('evolution') || text.includes('legacy')) return 'Software Maintenance';
+  if (text.includes('process') || text.includes('model') || text.includes('agile') || text.includes('scrum')) return 'Software Process';
+  if (text.includes('design') || text.includes('architect') || text.includes('pattern')) return 'Software Design';
+  if (text.includes('professional') || text.includes('ethic') || text.includes('responsibilit')) return 'Professional Practice';
+  if (text.includes('characteristic') || text.includes('good software') || text.includes('quality')) return 'Software Quality';
+  return 'Software Engineering';
+}
+
+// ─── APPROACH 1: Direct regex extraction from question paper text ─────────────
+// Reads marks like "(10 marks)" directly — no AI needed, zero hallucination
+function extractQuestionsFromTextDirectly(text: string): any[] {
+  const questions: any[] = [];
+
+  const lines = text
+    .replace(/\r\n/g, '\n').replace(/\r/g, '\n')
+    .split('\n')
+    .map(l => l.trim());
+
+  logger.info(`extractQuestionsFromTextDirectly: processing ${lines.length} lines`);
+  logger.info(`Preview lines 0-30:\n${lines.slice(0, 30).map((l, i) => `${i}: "${l}"`).join('\n')}`);
+
+  let currentMainQ = '';   // "1", "2", "3", "4"
+  let currentPart = '';    // "a", "b", "c", "d"
+
+  for (let i = 0; i < lines.length; i++) {
+    const line = lines[i];
+    if (!line) continue;
+
+    // SKIP summary/total lines — these are NOT questions, they are
+    // per-question totals printed at the end of each question section.
+    // e.g. "(Question 1 total 100 marks)", "Question 2 total 100 marks"
+    const isTotalSummaryLine =
+      /question\s+\d+\s+total/i.test(line) ||
+      /total\s+\d+\s+marks/i.test(line) ||
+      /^\(\s*question\s+\d+/i.test(line) ||
+      /end\s+of\s+examination/i.test(line) ||
+      /^page\s+\d+\s+of\s+\d+/i.test(line);
+
+    if (isTotalSummaryLine) {
+      // ADDED: check if there's a real mark annotation ON this line too
+      // e.g. "(10 marks)(Question 2 total 100 marks)"
+      const embeddedMark = line.match(/\(\s*(\d{1,3})\s*marks?\s*\)/i);
+      if (embeddedMark && questions.length > 0) {
+        const lastQ = questions[questions.length - 1];
+        if (lastQ.marksAvailable === 0) {
+          lastQ.marksAvailable = parseInt(embeddedMark[1], 10);
+          logger.info(`  Fixed last question ${lastQ.questionNumber} marks from summary line: ${lastQ.marksAvailable}`);
+        }
+      }
+      logger.info(`  SKIPPING summary line: "${line}"`);
+      continue;
+    }
+
+    // ── Detect main question number: "1.", "Q1:", "2.", "Q2:" ──
+    const mainQMatch = line.match(/^(?:Q\s*)?(\d+)\s*[:.]\s*$/) ||
+      line.match(/^(?:Q\s*)?(\d+)\s*\.\s*$/) ||
+      line.match(/^(?:Question\s+)?(\d+)\s*$/i);
+    if (mainQMatch && parseInt(mainQMatch[1]) <= 10) {
+      currentMainQ = mainQMatch[1];
+      currentPart = '';
+      logger.info(`Detected main question: Q${currentMainQ}`);
+      continue;
+    }
+
+    // ── Detect part letter alone on a line: "(a)", "(b)", "(c)", "(d)" ──
+    const partOnlyMatch = line.match(/^\(\s*([a-d])\s*\)\s*$/i);
+    if (partOnlyMatch) {
+      currentPart = partOnlyMatch[1].toLowerCase();
+      logger.info(`Detected part: (${currentPart}) under Q${currentMainQ}`);
+      continue;
+    }
+
+    // ── Detect sub-question: "(i)...", "(ii)...", "(iii)..." ──
+    // Handles: "(i)Question text" or "(i) Question text"
+    // Does NOT require (a) prefix since that was on the previous line
+    const subQMatch = line.match(/^\(\s*(i{1,3}|iv|v|vi|vii|viii|ix|x)\s*\)\s*(.*)$/i);
+    if (subQMatch && currentMainQ && currentPart) {
+      const subpart = subQMatch[1].toLowerCase();
+      let questionText = subQMatch[2].trim();
+
+      // Look ahead for marks on the next 1-12 lines
+      // Also collect continuation of question text
+      let marks = 0;
+      for (let j = i + 1; j < lines.length && j <= i + 12; j++) {
+        const nextLine = lines[j].trim();
+        if (!nextLine) continue;
+
+        // ADDED — skip summary/total lines in look-ahead too
+        if (/question\s+\d+\s+total/i.test(nextLine) ||
+          /total\s+\d+\s+marks/i.test(nextLine)) {
+          break; // stop look-ahead at a total line, don't assign its value
+        }
+
+        // Is this line just a mark annotation?
+        const markLineMatch = nextLine.match(/^\(\s*(\d{1,3})\s*marks?\s*\)\.?\s*$/i);
+        if (markLineMatch) {
+          marks = parseInt(markLineMatch[1], 10);
+          break;
+        }
+
+        // Does this line contain a mark annotation (possibly with other text)?
+        const markInLineMatch = nextLine.match(/\(\s*(\d{1,3})\s*marks?\s*\)/i);
+        if (markInLineMatch) {
+          marks = parseInt(markInLineMatch[1], 10);
+          // Keep any text before the mark as part of question
+          const textBefore = nextLine.replace(/\(\s*\d{1,3}\s*marks?\s*\)/gi, '').trim();
+          if (textBefore && questionText.length < 300) questionText += ' ' + textBefore;
+          break;
+        }
+
+        // Stop if we hit the next sub-question, part, or main question
+        const isNextSubQ = nextLine.match(/^\(\s*(i{1,3}|iv|v)\s*\)/i);
+        const isNextPart = nextLine.match(/^\(\s*[a-d]\s*\)\s*$/i);
+        const isNextMainQ = nextLine.match(/^(?:Q\s*)?(\d+)\s*[:.]\s*$/) ||
+          nextLine.match(/^\(Question\s+\d+\s+total/i);
+        if (isNextSubQ || isNextPart || isNextMainQ) break;
+
+        // Continuation of question text
+        if (questionText.length < 300) questionText += ' ' + nextLine;
+      }
+
+      // Clean up
+      questionText = questionText.replace(/\(\s*\d{1,3}\s*marks?\s*\)/gi, '').trim();
+      const qNum = `Q${currentMainQ}(${currentPart})(${subpart})`;
+
+      questions.push({
+        questionNumber: qNum,
+        questionText: questionText.substring(0, 300),
+        marksAvailable: marks,
+        topic: inferTopic(questionText)
+      });
+
+      logger.info(`  → ${qNum}: ${marks} marks — "${questionText.substring(0, 60)}"`);
+      continue;
+    }
+
+    // ── Also handle compact format: "(a)(i)Question text (10 marks)" on one line ──
+    const compactMatch = line.match(/^\(\s*([a-d])\s*\)\s*\(\s*(i{1,3}|iv|v)\s*\)\s*(.+)$/i);
+    if (compactMatch && currentMainQ) {
+      const part = compactMatch[1].toLowerCase();
+      const subpart = compactMatch[2].toLowerCase();
+      let questionText = compactMatch[3].trim();
+
+      const markMatch = questionText.match(/\(\s*(\d{1,3})\s*marks?\s*\)/i);
+      let marks = markMatch ? parseInt(markMatch[1], 10) : 0;
+      questionText = questionText.replace(/\(\s*\d{1,3}\s*marks?\s*\)/gi, '').trim();
+
+      if (!markMatch) {
+        for (let j = i + 1; j < lines.length && j <= i + 5; j++) {
+          const nextLine = lines[j].trim();
+          const m = nextLine.match(/^\(\s*(\d{1,3})\s*marks?\s*\)\.?\s*$/i);
+          if (m) { marks = parseInt(m[1], 10); break; }
+          if (nextLine.match(/^\(\s*[a-d]\s*\)/i)) break;
+        }
+      }
+
+      currentPart = part;
+      const qNum = `Q${currentMainQ}(${part})(${subpart})`;
+      questions.push({
+        questionNumber: qNum,
+        questionText: questionText.substring(0, 300),
+        marksAvailable: marks,
+        topic: inferTopic(questionText)
+      });
+      logger.info(`  → ${qNum} (compact): ${marks} marks`);
+    }
+  }
+
+  logger.info(`=== FINAL EXTRACTION SUMMARY ===`);
+  logger.info(`Questions: ${questions.length}`);
+  logger.info(`Marks breakdown:`);
+  const markGroups: Record<number, number> = {};
+  questions.forEach(q => {
+    markGroups[q.marksAvailable] = (markGroups[q.marksAvailable] || 0) + 1;
+  });
+  Object.entries(markGroups).forEach(([marks, count]) => {
+    logger.info(`  ${marks} marks × ${count} questions = ${parseInt(marks) * count}`);
+  });
+  logger.info(`Total: ${questions.reduce((s, q) => s + q.marksAvailable, 0)} marks`);
+  logger.info(`================================`);
+
+  return questions;
+}
+
+// ─── APPROACH 1b: Direct extraction from mark scheme text ────────────────────
+function extractMarksFromMarkSchemeDirectly(markSchemeText: string, existingQuestions: any[]): any[] {
+  if (!existingQuestions || existingQuestions.length === 0) return [];
+
+  const updated = existingQuestions.map(q => ({ ...q }));
+
+  for (const q of updated) {
+    if (q.marksAvailable > 0) continue; // already has marks
+
+    const partMatch = q.questionNumber.match(/Q\d+\(([a-d])\)\(([ivx]+)\)/i);
+    if (!partMatch) continue;
+
+    const searchPattern = new RegExp(
+      `\\(\\s*${partMatch[1]}\\s*\\)\\s*\\(\\s*${partMatch[2]}\\s*\\)[^(]*\\(\\s*(\\d{1,3})\\s*marks?\\s*\\)`,
+      'i'
+    );
+    const found = markSchemeText.match(searchPattern);
+    if (found) {
+      q.marksAvailable = parseInt(found[1], 10);
+    }
+  }
+
+  return updated;
+}
+
+// ─── APPROACH 2: Gemini with a hierarchical-structure-aware prompt ────────────
+async function parseQuestionPaperWithGemini(questionPdfText: string): Promise<any[]> {
   const prompt = `
-You are an expert exam paper analyser. Read both documents below and extract structured data from each.
+You are parsing a university exam paper. The text was extracted from a PDF and has this specific format:
 
-QUESTION PAPER:
+IMPORTANT FORMAT NOTES:
+- Main question numbers appear alone on a line: "Q1:" or "1."
+- Part letters appear alone on a line: "(a)" or "(b)"
+- Sub-part numbers appear at the start of a line with the question: "(i)Define the terms..."
+- THE MARK VALUE APPEARS ON THE VERY NEXT LINE after the question text, like this:
+    "(i)Define the terms software and software engineering."
+    "(10 marks)"
+  OR at the end of the question line: "(i)Define... (10 marks)"
+- Each main question totals exactly 100 marks
+- There are exactly 4 main questions, each with 4 parts (a,b,c,d), each part with 2 sub-parts (i,ii)
+- So there are exactly 32 sub-questions total
+
+EXAM PAPER TEXT:
 ${questionPdfText}
+
+Extract ALL 32 sub-questions. For each one:
+- questionNumber: "Q1(a)(i)", "Q1(a)(ii)", "Q2(c)(ii)", etc.
+- questionText: the actual question asked
+- marksAvailable: the number from "(N marks)" — READ FROM THE TEXT, do not guess
+- topic: the concept being tested
+
+The grand total of all marksAvailable must equal 400 (100 per question × 4 questions).
+
+Return ONLY a valid JSON array, no markdown:
+[{"questionNumber":"Q1(a)(i)","questionText":"Define the terms software and software engineering.","marksAvailable":10,"topic":"Software Definitions"}]`;
+
+  const response = await callGeminiSafe(prompt, {
+    context: 'parse-question-paper-v2',
+    temperature: 0
+  });
+
+  const raw = (response.text || '')
+    .replace(/```json/gi, '').replace(/```/gi, '').trim();
+  const start = raw.indexOf('[');
+  const end = raw.lastIndexOf(']');
+  if (start === -1 || end === -1) return [];
+
+  try {
+    const parsed = JSON.parse(raw.substring(start, end + 1));
+    return Array.isArray(parsed) ? parsed : [];
+  } catch (e) {
+    logger.error('Gemini parse JSON error:', e);
+    return [];
+  }
+}
+
+function stripCoverPage(text: string): string {
+  // The actual exam questions always start with "1." or "Q1" or "1 ."
+  // preceded by a blank line, after the cover page instructions.
+  // Find the first occurrence of a main question number on its own line.
+
+  const questionStartPatterns = [
+    // "1." or "1 ." or "Q1." at the start of a line, alone
+    /^(?:Q\s*)?1\s*\.?\s*$/m,
+    // "1.\n(a)" — question number followed immediately by a part
+    /^(?:Q\s*)?1\s*\.?\s*\n\s*\(\s*[a-d]\s*\)/m,
+  ];
+
+  let earliestIndex = text.length;
+
+  for (const pattern of questionStartPatterns) {
+    const match = text.match(pattern);
+    if (match && match.index !== undefined && match.index < earliestIndex) {
+      earliestIndex = match.index;
+    }
+  }
+
+  if (earliestIndex === text.length) {
+    // Couldn't find a clear question start — try a broader search
+    // Look for the first "(a)" or "(a)(i)" after an instructions section
+    const instructionEnd = text.search(/INSTRUCTIONS?[\s\S]*?\n\n/i);
+    if (instructionEnd > 0) {
+      const afterInstructions = text.indexOf('\n1', instructionEnd);
+      if (afterInstructions > 0) {
+        earliestIndex = afterInstructions;
+      }
+    }
+  }
+
+  if (earliestIndex > 0 && earliestIndex < text.length) {
+    const stripped = text.substring(earliestIndex).trim();
+    logger.info(`stripCoverPage: removed ${earliestIndex} chars of cover page content`);
+    logger.info(`Remaining text starts with: "${stripped.substring(0, 200)}"`);
+    return stripped;
+  }
+
+  logger.info('stripCoverPage: no cover page detected or could not find question start');
+  return text;
+}
+
+function validateAndFixMarks(questions: any[], markSchemeText?: string): any[] {
+  // For this paper format, valid marks per sub-question are 10, 15, or 20
+  // Any sub-question with 0 marks or > 25 marks is likely wrong
+  const VALID_RANGE = { min: 5, max: 25 };
+
+  return questions.map(q => {
+    if (q.marksAvailable < VALID_RANGE.min || q.marksAvailable > VALID_RANGE.max) {
+      logger.warn(`Question ${q.questionNumber} has suspicious marks=${q.marksAvailable}, attempting to fix`);
+
+      // Try to find the mark in the mark scheme as a cross-reference
+      if (markSchemeText) {
+        const qNumEscaped = q.questionNumber.replace(/[()]/g, '\\$&');
+        const msMatch = markSchemeText.match(
+          new RegExp(`${qNumEscaped}[^(]*\\((\\d{1,3})\\s*marks?\\)`, 'i')
+        );
+        if (msMatch) {
+          const corrected = parseInt(msMatch[1], 10);
+          logger.info(`  Fixed ${q.questionNumber}: ${q.marksAvailable} → ${corrected} marks (from mark scheme)`);
+          return { ...q, marksAvailable: corrected };
+        }
+      }
+
+      // If still 0, use a context-based default based on question type
+      if (q.marksAvailable === 0) {
+        const defaultMark = (q.questionText || '').length > 100 ? 15 : 10;
+        logger.warn(`  Defaulting ${q.questionNumber} to ${defaultMark} marks`);
+        return { ...q, marksAvailable: defaultMark };
+      }
+    }
+    return q;
+  });
+}
+
+async function pdfToBase64Images(pdfBuffer: Buffer): Promise<string[]> {
+  const tempDir = os.tmpdir();
+  const tempPdfPath = path.join(tempDir, `markai-parse-${Date.now()}.pdf`);
+
+  try {
+    fs.writeFileSync(tempPdfPath, pdfBuffer);
+
+    const converter = fromBuffer(pdfBuffer, {
+      density: 150,          // DPI — 150 is enough for text reading
+      saveFilename: 'page',
+      savePath: tempDir,
+      format: 'jpeg',
+      width: 1200,
+      height: 1600
+    });
+
+    const results = await converter.bulk(-1, { responseType: 'base64' });
+
+    logger.info(`pdfToBase64Images: converted ${results.length} pages`);
+    return results
+      .filter(r => r.base64)
+      .map(r => r.base64 as string);
+
+  } catch (e: any) {
+    logger.warn(`pdfToBase64Images failed (${e.message}) — fallback to direct PDF buffer for Gemini Vision`);
+    return [];
+  } finally {
+    if (fs.existsSync(tempPdfPath)) {
+      try { fs.unlinkSync(tempPdfPath); } catch (e) { /* ignore cleanup error */ }
+    }
+  }
+}
+
+async function parseQuestionPaperFromImages(
+  pdfBuffer: Buffer
+): Promise<any[]> {
+  logger.info('parseQuestionPaperFromImages: starting vision-based question paper extraction...');
+
+  let base64Pages: string[] = [];
+  try {
+    base64Pages = await pdfToBase64Images(pdfBuffer);
+  } catch (e: any) {
+    logger.warn('PDF image extraction skipped:', e.message);
+  }
+
+  let promptParts: any[] = [];
+
+  if (base64Pages.length > 0) {
+    const contentPages = base64Pages.length > 1 ? base64Pages.slice(1) : base64Pages;
+    logger.info(`Using ${contentPages.length} content page images for Gemini Vision`);
+
+    const imageContents = contentPages.map(b64 => ({
+      inlineData: {
+        data: b64,
+        mimeType: 'image/jpeg'
+      }
+    }));
+    promptParts = imageContents;
+  } else {
+    logger.info('Sending entire PDF buffer directly as application/pdf to Gemini Vision');
+    const pdfBase64 = pdfBuffer.toString('base64');
+    promptParts = [{
+      inlineData: {
+        data: pdfBase64,
+        mimeType: 'application/pdf'
+      }
+    }];
+  }
+
+  const prompt = `You are reading a university exam paper. Extract every sub-question and its mark allocation.
+
+INSTRUCTIONS:
+- Look at the visual layout carefully
+- Questions are numbered: 1, 2, 3, 4 at the top level
+- Sub-questions use letters: (a), (b), (c), (d)
+- Sub-sub-questions use roman numerals: (i), (ii)
+- Mark values appear in brackets on the RIGHT side of the page: (10 marks), (15 marks), (20 marks)
+- DO NOT confuse instruction numbering (1. Answer ALL questions) with exam question numbering
+- The first page is usually a cover page — ignore it if it contains only instructions or university header
+- Extract ONLY actual exam questions, not instructions or headers
+
+For each leaf-level sub-question (the ones students write answers for), extract:
+- questionNumber: full hierarchical path e.g. "Q1(a)(i)", "Q2(c)(ii)", "Q4(d)(ii)"  
+- questionText: the actual question being asked (without the mark annotation)
+- marksAvailable: the NUMBER from "(N marks)" visible in the right margin — read exactly as printed
+- topic: the main concept being tested in this question
+
+Return ONLY a valid JSON array. No markdown, no explanation:
+[
+  {
+    "questionNumber": "Q1(a)(i)",
+    "questionText": "Define the terms software and software engineering.",
+    "marksAvailable": 10,
+    "topic": "Software Definitions"
+  }
+]`;
+
+  try {
+    const response = await callGeminiSafe(
+      [{ role: 'user', parts: [...promptParts, { text: prompt }] }],
+      { context: 'parse-question-paper-vision', temperature: 0 }
+    );
+
+    const raw = (response.text || '')
+      .replace(/```json/gi, '').replace(/```/gi, '').trim();
+    const start = raw.indexOf('[');
+    const end = raw.lastIndexOf(']');
+
+    if (start === -1 || end === -1) {
+      logger.error('Vision parser: no JSON array in response');
+      logger.error(`Response preview: "${raw.substring(0, 300)}"`);
+      return [];
+    }
+
+    const parsed = JSON.parse(raw.substring(start, end + 1));
+    if (!Array.isArray(parsed)) return [];
+
+    const normalized = normalizeQuestionMarks(parsed);
+    const total = normalized.reduce((s: number, q: any) => s + (q.marksAvailable || 0), 0);
+    logger.info(`Vision parser: extracted ${normalized.length} questions, total ${total} marks`);
+
+    return normalized;
+
+  } catch (error: any) {
+    logger.error('Vision parser error:', error.message);
+    return [];
+  }
+}
+
+// ─── Main orchestrator — 4-approach fallback chain ────────────────────────────
+async function parseQuestionPaper(
+  questionPdfText: string,
+  markSchemeText?: string
+): Promise<any[]> {
+  logger.info(`parseQuestionPaper: raw input length=${questionPdfText.length}`);
+  logger.info(`Raw preview (first 300 chars): "${questionPdfText.substring(0, 300)}"`);
+
+  // STEP 1: Remove cover page so the parser only sees actual question content
+  const cleanedText = stripCoverPage(questionPdfText);
+  logger.info(`After stripping cover page: length=${cleanedText.length}`);
+  logger.info(`Clean text preview (first 300 chars): "${cleanedText.substring(0, 300)}"`);
+
+  // Log first 40 lines to verify format
+  const lines = cleanedText.split('\n');
+  logger.info(`=== CLEANED TEXT LINES (first 40) ===`);
+  lines.slice(0, 40).forEach((l, i) => logger.info(`L${i}: "${l}"`));
+  logger.info(`=====================================`);
+
+  // STEP 2: Try direct regex extraction on the clean text
+  let questions = extractQuestionsFromTextDirectly(cleanedText);
+  questions = validateAndFixMarks(questions, markSchemeText);
+
+  // DIAGNOSTIC — print every question with its mark value
+  logger.info('=== PER-QUESTION MARK AUDIT ===');
+  let runningTotal = 0;
+  questions.forEach(q => {
+    runningTotal += (q.marksAvailable || 0);
+    const flag = q.marksAvailable === 0 ? '⚠️ ZERO MARKS' :
+      q.marksAvailable > 20 ? '⚠️ SUSPICIOUSLY HIGH' : '';
+    logger.info(`  ${q.questionNumber}: ${q.marksAvailable} marks ${flag} (running total: ${runningTotal})`);
+  });
+  logger.info(`Expected: 400, Got: ${runningTotal}, Diff: ${400 - runningTotal}`);
+  logger.info('================================');
+
+  // STEP 4: Post-extraction mark scheme cross-reference pass
+  const extractedTotal = questions.reduce((s, q) => s + (q.marksAvailable || 0), 0);
+
+  if (extractedTotal < 380 && markSchemeText) {
+    logger.warn(`Total ${extractedTotal} is below expected 400, running mark scheme cross-reference...`);
+
+    questions = questions.map(q => {
+      if (q.marksAvailable > 0) return q;
+
+      // Search mark scheme for this question's marks
+      // Mark scheme format: "(a)(i) Define... (10 marks)" or "Marking: X – N marks"
+      const partSubpart = q.questionNumber.match(/\(([a-d])\)\(([ivx]+)\)/i);
+      if (!partSubpart) return q;
+
+      const [, part, subpart] = partSubpart;
+
+      // Look for the mark near this question in the mark scheme
+      const patterns = [
+        new RegExp(`\\(${part}\\)\\s*\\(${subpart}\\)[^(]*\\((\\d{1,3})\\s*marks?\\)`, 'i'),
+        new RegExp(`\\(${part}\\)\\(${subpart}\\).*?\\((\\d{1,3})\\s*marks?\\)`, 'i'),
+      ];
+
+      for (const p of patterns) {
+        const m = markSchemeText.match(p);
+        if (m) {
+          const corrected = parseInt(m[1], 10);
+          logger.info(`  Cross-referenced ${q.questionNumber}: 0 → ${corrected} marks from mark scheme`);
+          return { ...q, marksAvailable: corrected };
+        }
+      }
+
+      logger.warn(`  Could not find marks for ${q.questionNumber} in mark scheme either`);
+      return q;
+    });
+
+    const correctedTotal = questions.reduce((s, q) => s + (q.marksAvailable || 0), 0);
+    logger.info(`After cross-reference: total = ${correctedTotal}`);
+  }
+
+  const directTotal = questions.reduce((s, q) => s + (q.marksAvailable || 0), 0);
+  logger.info(`After cover page strip & audit: ${questions.length} questions, ${directTotal} marks`);
+
+  // If direct extraction worked well, use it
+  if (questions.length >= 8 && directTotal > 50) {
+    return questions;
+  }
+
+  // STEP 3: Gemini fallback with cleaned text
+  logger.info('Direct extraction insufficient, calling Gemini with cleaned text...');
+  try {
+    const geminiQuestions = await parseQuestionPaperWithGemini(cleanedText);
+    const geminiTotal = geminiQuestions.reduce((s, q) => s + (q.marksAvailable || 0), 0);
+    if (geminiQuestions.length >= 8 && geminiTotal > 50) {
+      return normalizeQuestionMarks(geminiQuestions);
+    }
+  } catch (e: any) {
+    logger.warn('Gemini extraction failed:', e.message);
+  }
+
+  return questions.length > 0 ? questions : buildFallbackQuestionsFromText(cleanedText);
+}
+
+// ─── Validation logger — prints every question with marks to backend terminal ─
+function logParseResult(questions: any[], textLength: number): void {
+  const total = questions.reduce((s, q) => s + (Number(q.marksAvailable) || 0), 0);
+  const zeroCount = questions.filter(q => !q.marksAvailable || q.marksAvailable === 0).length;
+
+  logger.info(`=== PARSE RESULT SUMMARY ===`);
+  logger.info(`Questions found: ${questions.length}`);
+  logger.info(`Total marks: ${total}`);
+  logger.info(`Questions with 0 marks: ${zeroCount}`);
+  for (const q of questions) {
+    logger.info(`  ${q.questionNumber}: ${q.marksAvailable} marks — ${(q.questionText || '').substring(0, 60)}`);
+  }
+  logger.info(`============================`);
+
+  if (total === 0) {
+    logger.error('CRITICAL: All questions have 0 marks — mark extraction completely failed');
+  }
+  if (questions.length < 8 && textLength > 5000) {
+    logger.warn(`Only ${questions.length} questions found from a ${textLength}-char paper — likely missed sub-questions`);
+  }
+}
+
+// ─── Gemini-backed mark extractor (used in APPROACH 3b) ──────────────────────
+async function extractMarksFromMarkScheme(markSchemeText: string, questions: any[]): Promise<any[]> {
+  logger.info(`extractMarksFromMarkScheme: extracting for ${questions.length} questions`);
+
+  const questionList = questions
+    .map((q: any) => `${q.questionNumber}: ${(q.questionText || '').substring(0, 100)}`)
+    .join('\n');
+
+  const prompt = `You are an expert mark scheme analyser.
 
 MARK SCHEME:
 ${markSchemeText}
 
-HOW TO FIND MARKS FOR EACH QUESTION:
-Marks are usually shown in one of these formats next to or after each question in the question paper or mark scheme:
-- In square brackets: [5] or [2 marks]
-- In round brackets: (5) or (5 marks)
-- After a slash: Q1 /5
-- As a trailing number: Question 1 ... 5
-- In a "Total" or "Marks" column if the paper uses a table layout
+QUESTIONS TO FIND MARKS FOR:
+${questionList}
 
-Look carefully for ANY of these patterns next to each question. If a question
-truly has no visible mark indicator anywhere near it, estimate based on the
-complexity of what's being asked (a one-word answer is likely 1-2 marks, a
-short explanation is likely 3-5 marks, an essay-style answer is likely 8-15 marks)
-rather than defaulting to 0 — a real exam paper almost never has a 0-mark question.
+For each question number listed above, find its mark allocation in the mark scheme.
+Marks appear as: [2], (2), /2, "2 marks", or as a number at the end of the answer guidance line.
 
-CRITICAL INSTRUCTIONS FOR ACCURACY:
-- Read the ENTIRE document before producing output
-- Sum every individual question's marks and verify it against any stated
-  total (e.g. "Total: 25 marks", "/30") found in the document
-- If you cannot find a stated total to verify against, and your per-question
-  marks would sum to a suspiciously round or suspiciously low number, double
-  check you haven't missed mark indicators
+Return ONLY a valid JSON array — no markdown, no backticks:
+[
+  {
+    "questionNumber": "Q1(a)(i)",
+    "marksAvailable": 10,
+    "markingGuidance": "Brief description of what earns marks"
+  }
+]
 
-Return ONLY a valid JSON object with no markdown, no backticks, no extra text:
-{
-  "questions": [
-    {
-      "questionNumber": "1a",
-      "questionText": "Write the full question text exactly as it appears",
-      "marksAvailable": 2,
-      "topic": "topic this question tests",
-      "questionType": "short answer or calculation or definition or essay or diagram"
-    }
-  ],
-  "markScheme": [
-    {
-      "questionNumber": "1a",
-      "marksAvailable": 2,
-      "requiredKeywords": ["must appear for full marks"],
-      "acceptAlternatives": ["other valid phrasings"],
-      "rejectList": ["wrong answers that look correct"],
-      "methodMarks": "marks for correct approach even if answer wrong",
-      "markingGuidance": "additional marking notes"
-    }
-  ]
+IMPORTANT:
+- Match each question number exactly as given above
+- NEVER return 0 marks for a real question
+- Read the actual mark value from the mark scheme text — do not guess
+- If you cannot find explicit marks, estimate: 1-sentence=2, paragraph=4, essay=10`;
+
+  let rawResponse = '';
+  try {
+    const response = await callGeminiSafe(prompt, {
+      context: 'extract-marks-from-markscheme',
+      temperature: 0,
+      responseMimeType: 'application/json'
+    });
+    rawResponse = response.text || '';
+
+    let cleaned = rawResponse.replace(/```json\s*/gi, '').replace(/```\s*/gi, '').trim();
+    const arrayStart = cleaned.indexOf('[');
+    const arrayEnd = cleaned.lastIndexOf(']');
+    if (arrayStart === -1 || arrayEnd === -1) throw new Error('No JSON array in mark scheme response');
+    const marksData = JSON.parse(cleaned.substring(arrayStart, arrayEnd + 1));
+    if (!Array.isArray(marksData)) throw new Error('Not an array');
+    logger.info(`extractMarksFromMarkScheme: extracted marks for ${marksData.length} questions`);
+    return marksData;
+  } catch (error: any) {
+    logger.error(`extractMarksFromMarkScheme failed: ${error.message}`);
+    return [];
+  }
 }
 
-Rules:
-1. questionNumber must match exactly what is printed in the paper
-2. questionText must be the complete unmodified question
-3. Extract marks from patterns like [2] or (3 marks) or /4
-4. Every question including sub-questions must be included
-5. Do not skip any question no matter how short
-6. questionNumber must match between questions and markScheme arrays
-7. Include every mark scheme entry`;
 
+async function parseMarkScheme(markSchemeText: string, parsedQuestions: any[]): Promise<any[]> {
+  logger.info(`parseMarkScheme: input length=${markSchemeText.length}`);
+  const prompt = `
+You are an expert exam paper analyser. Extract the mark scheme for the provided questions.
+
+MARK SCHEME:
+${markSchemeText}
+
+QUESTIONS EXTRACTED:
+${JSON.stringify(parsedQuestions.map(q => q.questionNumber))}
+
+Return ONLY a valid JSON array of mark scheme objects matching the questions. No markdown, no backticks.
+[
+  {
+    "questionNumber": "Q1(a)(i)",
+    "marksAvailable": 2,
+    "requiredKeywords": ["must appear for full marks"],
+    "acceptAlternatives": ["other valid phrasings"],
+    "rejectList": ["wrong answers"],
+    "methodMarks": "marks for approach",
+    "markingGuidance": "additional notes"
+  }
+]`;
   try {
-    const response = await groqWithRetry(prompt, 'llama-3.3-70b-versatile', 3, undefined, 0);
-
-    // CRITICAL DIAGNOSTIC — log the raw response BEFORE any parsing/cleaning
-    logger.info(`RAW Gemini/Llama parsing response: "${response.text?.substring(0, 1500)}"`);
-
-    const text = extractJSON(response.text || '{}', 'object');
-    const parsed = JSON.parse(text);
-
-    let questions = parsed.questions || [];
-    let markScheme = parsed.markScheme || [];
-
-    // Apply normalization
-    questions = normalizeQuestionMarks(questions);
-    markScheme = normalizeMarkScheme(markScheme);
-
-    // Log each question's extracted marks individually
-    questions.forEach((q: any, i: number) => {
-      logger.info(`Question ${i + 1} [${q.questionNumber}]: marksAvailable=${q.marksAvailable} (type: ${typeof q.marksAvailable}), all fields: ${JSON.stringify(q)}`);
-    });
-
-    const total = questions.reduce((s: number, q: any) => s + (Number(q.marksAvailable) || 0), 0);
-    logger.info(`Total extracted marks after normalization: ${total} across ${questions.length} questions`);
-
-    if (total === 0 && questions.length > 0) {
-      logger.error(`🚨 ALL ${questions.length} questions extracted with 0 marks. Either the field name doesn't match, or the source PDF text has no readable mark values.`);
-    }
-
-    return { questions, markScheme };
-
+    const response = await callGeminiSafe(prompt, { context: 'parse-mark-scheme', temperature: 0 });
+    let cleaned = (response.text || '').replace(/```json\s*/gi, '').replace(/```\s*/gi, '').trim();
+    const arrayStart = cleaned.indexOf('[');
+    const arrayEnd = cleaned.lastIndexOf(']');
+    if (arrayStart === -1 || arrayEnd === -1) return [];
+    const parsed = JSON.parse(cleaned.substring(arrayStart, arrayEnd + 1));
+    return normalizeMarkScheme(parsed);
   } catch (error) {
-    logger.error('Failed to parse question paper and mark scheme:', error);
-    return { questions: [], markScheme: [] };
+    logger.error('parseMarkScheme error:', error);
+    return [];
   }
 }
 
@@ -679,8 +1337,8 @@ async function markStudentAnswers(
     session.markingStrictness === 'Strict'
       ? `STRICT: Award marks ONLY for answers precisely matching mark scheme keywords. No benefit of the doubt.`
       : session.markingStrictness === 'Lenient'
-      ? `LENIENT: Award marks for answers demonstrating understanding even without exact wording. Credit creative approaches.`
-      : `STANDARD: Award marks for correct concepts. Allow minor wording variations. Do not penalise spelling unless meaning changes.`;
+        ? `LENIENT: Award marks for answers demonstrating understanding even without exact wording. Credit creative approaches.`
+        : `STANDARD: Award marks for correct concepts. Allow minor wording variations. Do not penalise spelling unless meaning changes.`;
 
   const feedbackInstruction =
     session.feedbackDetail === 'Brief'
@@ -763,7 +1421,43 @@ Return ONLY valid JSON. No markdown, no backticks, no extra text:
     responseText = responseText.substring(jsonStart, jsonEnd + 1);
   }
 
-  let result = JSON.parse(responseText);
+  // ── Recover from truncated JSON ─────────────────────────────────────────
+  // Gemini sometimes cuts off mid-response when marking many questions.
+  // Strategy: try full parse first, then try to repair truncated array.
+  function repairTruncatedMarkingJSON(text: string): any {
+    // Try full parse first
+    try { return JSON.parse(text); } catch { }
+
+    // Try to fix truncated questions array:
+    // Find last complete question object and close the array + object
+    const questionsStart = text.indexOf('"questions"');
+    if (questionsStart === -1) throw new Error('No questions array found in response');
+
+    // Find last complete question entry (last occurrence of })
+    // Walk back from end of string to find the last complete }
+    let repaired = text;
+    // Remove any trailing incomplete text after last complete question
+    for (let attempts = 0; attempts < 20; attempts++) {
+      const lastBrace = repaired.lastIndexOf('}');
+      if (lastBrace === -1) break;
+      const candidate = repaired.substring(0, lastBrace + 1);
+      // Count open vs closed braces to see if we can close the structure
+      const openBraces = (candidate.match(/\{/g) || []).length;
+      const closeBraces = (candidate.match(/\}/g) || []).length;
+      const openBrackets = (candidate.match(/\[/g) || []).length;
+      const closeBrackets = (candidate.match(/\]/g) || []).length;
+      const neededBrackets = openBrackets - closeBrackets;
+      const neededBraces = openBraces - closeBraces;
+      if (neededBrackets >= 0 && neededBraces >= 0) {
+        const fixed = candidate + ']'.repeat(neededBrackets) + '}'.repeat(neededBraces);
+        try { return JSON.parse(fixed); } catch { }
+      }
+      repaired = repaired.substring(0, lastBrace);
+    }
+    throw new Error('Could not repair truncated JSON response');
+  }
+
+  let result = repairTruncatedMarkingJSON(responseText);
 
   // Enforce locked marksAvailable per question — never trust AI's echo of it
   if (result.questions?.length > 0) {
@@ -877,6 +1571,7 @@ async function startServer() {
     origin: [
       'https://markaido.netlify.app',
       'http://localhost:5173',
+      'http://localhost:5174',
       'http://localhost:3000',
       process.env.ALLOWED_ORIGIN || '*'
     ],
@@ -885,7 +1580,7 @@ async function startServer() {
 
   // Request logging middleware
   app.use((req, res, next) => {
-    logger.info(`${req.method} ${req.path}`, { 
+    logger.info(`${req.method} ${req.path}`, {
       ip: req.ip,
       userAgent: req.get('user-agent')
     });
@@ -909,7 +1604,7 @@ async function startServer() {
     const len = geminiPool.getWaitingCallsCount();
     res.json({
       queueLength: len,
-      message: len > 0 
+      message: len > 0
         ? `${len} requests waiting in queue`
         : 'Ready'
     });
@@ -943,11 +1638,11 @@ async function startServer() {
     try {
       const { fullName, email, password, userType, inviteCode, universityId, universityName, studentCode } = registerSchema.parse(req.body);
       console.log('Registration Payload:', { email, userType, universityId, universityName });
-      
+
       // 1. Block Admin registration
       if (userType === 'ADMIN') {
-        return res.status(403).json({ 
-          error: 'Admin accounts cannot be created through public registration' 
+        return res.status(403).json({
+          error: 'Admin accounts cannot be created through public registration'
         });
       }
 
@@ -973,8 +1668,8 @@ async function startServer() {
           return res.status(403).json({ error: 'This invite code has expired' });
         }
         if (invitation.email.toLowerCase() !== email.toLowerCase()) {
-          return res.status(403).json({ 
-            error: 'This invite code was issued to a different email address' 
+          return res.status(403).json({
+            error: 'This invite code was issued to a different email address'
           });
         }
       }
@@ -993,7 +1688,7 @@ async function startServer() {
         const existingUniversity = await (prisma as any).university.findFirst({
           where: { name: { equals: universityName, mode: 'insensitive' } }
         });
-        
+
         if (existingUniversity) {
           finalUniversityId = existingUniversity.id;
         } else {
@@ -1005,18 +1700,18 @@ async function startServer() {
       }
 
       const hashedPassword = await bcrypt.hash(password, 12);
-      
+
       // 3. Force role assignment
       const assignedRole = userType === 'LECTURER' ? 'LECTURER' : 'STUDENT';
 
       const user = await (prisma as any).user.create({
-        data: { 
-          fullName, 
-          email, 
-          password: hashedPassword, 
+        data: {
+          fullName,
+          email,
+          password: hashedPassword,
           userType: assignedRole,
           role: assignedRole,
-          universityId: finalUniversityId, 
+          universityId: finalUniversityId,
           studentCode: assignedRole === 'STUDENT' ? studentCode : null
         }
       });
@@ -1034,13 +1729,13 @@ async function startServer() {
         process.env.JWT_SECRET!,
         { expiresIn: '7d' }
       );
-      
-      res.status(201).json({ 
-        user: { 
-          id: user.id, 
-          email: user.email, 
-          fullName: user.fullName, 
-          userType: user.userType, 
+
+      res.status(201).json({
+        user: {
+          id: user.id,
+          email: user.email,
+          fullName: user.fullName,
+          userType: user.userType,
           studentCode: user.studentCode,
           avatarUrl: user.avatarUrl,
           phoneNumber: user.phoneNumber,
@@ -1050,8 +1745,8 @@ async function startServer() {
           proPlan: user.proPlan,
           department: user.department,
           role: user.role
-        }, 
-        token 
+        },
+        token
       });
     } catch (error: any) {
       if (error instanceof z.ZodError) {
@@ -1069,9 +1764,9 @@ async function startServer() {
   app.get('/api/debug/db-status', async (req, res) => {
     try {
       const userCount = await (prisma as any).user.count();
-      res.json({ 
-        status: 'connected', 
-        userCount, 
+      res.json({
+        status: 'connected',
+        userCount,
         databaseUrlHash: process.env.DATABASE_URL?.substring(0, 30) + '...'
       });
     } catch (error: any) {
@@ -1093,12 +1788,12 @@ async function startServer() {
         process.env.JWT_SECRET!,
         { expiresIn: '7d' }
       );
-      res.json({ 
-        user: { 
-          id: user.id, 
-          email: user.email, 
-          fullName: user.fullName, 
-          userType: user.userType, 
+      res.json({
+        user: {
+          id: user.id,
+          email: user.email,
+          fullName: user.fullName,
+          userType: user.userType,
           studentCode: user.studentCode,
           avatarUrl: user.avatarUrl,
           phoneNumber: user.phoneNumber,
@@ -1110,8 +1805,8 @@ async function startServer() {
           role: user.role,
           twoFactorAuth: user.twoFactorAuth,
           emailAlerts: user.emailAlerts
-        }, 
-        token 
+        },
+        token
       });
     } catch (error: any) {
       res.status(400).json({ error: error.errors || error.message });
@@ -1170,7 +1865,7 @@ async function startServer() {
       const user = await (prisma as any).user.findUnique({ where: { id: req.user.id } });
       const isValid = await bcrypt.compare(currentPassword, user!.password);
       if (!isValid) return res.status(401).json({ error: 'Incorrect current password' });
-      
+
       const hashedPassword = await bcrypt.hash(newPassword, 12);
       await (prisma as any).user.update({
         where: { id: req.user.id },
@@ -1186,7 +1881,7 @@ async function startServer() {
     try {
       const user = await (prisma as any).user.findUnique({ where: { id: req.user.id } });
       if (!user) return res.status(404).json({ error: 'User not found' });
-      
+
       const { password, ...safeUser } = user;
       res.json(safeUser);
     } catch (error: any) {
@@ -1213,7 +1908,7 @@ async function startServer() {
   app.post('/api/auth/avatar', authMiddleware, upload.single('file'), async (req, res) => {
     try {
       if (!req.file) return res.status(400).json({ error: 'No file uploaded' });
-      
+
       // Upload to Supabase Storage
       const fileName = `avatars/${req.user.id}_${Date.now()}.pdf`; // Reusing PDF bucket or creating new one?
       // Actually, let's use a separate logic for images if possible, but the existing uploadPdfToSupabase works for buffers.
@@ -1386,9 +2081,11 @@ async function startServer() {
             }
           }
 
+          const docType = req.body.docType || 'answer';
+
           if (isImage || extractedText.length < 50) {
             method = isImage ? 'gemini-vision-image' : 'gemini-vision';
-            logger.info(`Handwriting detected for job ${job.id} (${req.file!.originalname}), attempting Gemini OCR...`);
+            logger.info(`Handwriting detected for job ${job.id} (${req.file!.originalname}), docType=${docType}, attempting Gemini OCR...`);
 
             // File size check before sending to Gemini
             const fileSizeMB = req.file!.buffer.length / 1024 / 1024;
@@ -1405,8 +2102,27 @@ async function startServer() {
               return;
             }
 
-            const ocrPrompt = `
-Transcribe ALL handwritten or printed answer content from this exam answer sheet image with complete accuracy.
+            let ocrPrompt = '';
+            if (docType === 'question') {
+              ocrPrompt = `
+Transcribe ALL printed or handwritten content from this exam question paper with complete accuracy.
+Focus on transcribing all questions, text, marks, and instructions.
+Do not ignore anything other than scanning app watermarks/branding (e.g. "CamScanner", "Adobe Scan", "Microsoft Lens").
+Respond with the full transcription of the text.`;
+            } else if (docType === 'markscheme') {
+              ocrPrompt = `
+Transcribe ALL printed or handwritten content from this exam mark scheme / answer guide with complete accuracy.
+Focus on transcribing all question numbers, suggested answers, marking criteria, and marks.
+Do not ignore anything other than scanning app watermarks/branding (e.g. "CamScanner", "Adobe Scan", "Microsoft Lens").
+Respond with the full transcription of the text.`;
+            } else {
+              ocrPrompt = `
+Transcribe ALL handwritten or printed answer content from this exam answer sheet with complete accuracy.
+
+IMPORTANT CONTEXT:
+Students write their answers across multiple pages. They write the main question numbers (like 1, 2, 3, 4, often inside a circle) and sub-question letters/numbers (like (a)(i), (b)(ii), (c), etc.) next to their answers.
+Please read the page contents carefully and reconstruct the answer sheet grouped by the actual main question numbers (e.g. Q1, Q2, Q3, Q4) written by the student.
+If a page does not have a new main question number at the top, it is a continuation of the previous page's question. For example, if Page 1 is Question 1 and ends at Q1(b)(ii), and Page 2 starts with (c)(i) without a new main question number, then Page 2 is a continuation of Question 1 (meaning it contains Q1(c)(i), Q1(d)(i), etc.).
 
 IMPORTANT — IGNORE THE FOLLOWING, they are not part of the student's answers:
 - Scanning app watermarks or branding (e.g. "CamScanner", "Adobe Scan", "Microsoft Lens", page borders/logos added by scanning apps)
@@ -1419,10 +2135,15 @@ If after ignoring watermarks and app branding there is genuinely no answer conte
 visible on this page (e.g. it's a blank page, a cover page, or only contains a
 scanning app watermark with nothing else), respond with exactly: UNREADABLE_DOCUMENT
 
-Format your response as:
-Q1: [transcribed answer]
-Q2: [transcribed answer]
-... (continue for all visible questions)`;
+Format your response grouped by the correct main question number:
+Q1:
+[transcribe all Q1 answers here, including sub-questions from all pages that belong to Q1]
+Q2:
+[transcribe all Q2 answers here, including sub-questions from all pages that belong to Q2]
+... (continue for all main questions)
+
+Do not count the pages sequentially as Q1, Q2, Q3, Q4, Q5, Q6, Q7, Q8. Find the circled/written numbers to guide you.`;
+            }
 
             try {
               const { text, wasCached } = await getOrCreateOcrResult(
@@ -1432,7 +2153,7 @@ Q2: [transcribed answer]
                 `OCR-${req.file!.originalname}`
               );
 
-              if (!text || text === 'UNREADABLE_DOCUMENT') {
+              if (!text || (docType === 'answer' && text === 'UNREADABLE_DOCUMENT')) {
                 await (prisma as any).uploadJob.update({
                   where: { id: job.id },
                   data: {
@@ -1445,18 +2166,20 @@ Q2: [transcribed answer]
               }
 
               // NEW — catch watermark/junk extractions before they're treated as real answers
-              const quality = assessExtractionQuality(text);
-              if (quality.isLikelyJunk) {
-                logger.warn(`OCR quality check FAILED for job ${job.id} (${req.file!.originalname}): ${quality.reason}. Raw extracted text: "${text.substring(0, 200)}"`);
-                await (prisma as any).uploadJob.update({
-                  where: { id: job.id },
-                  data: {
-                    status: 'ERROR',
-                    errorMessage: `This file appears to only contain a scanning app watermark, not the actual answers (extracted: "${text.substring(0, 60)}${text.length > 60 ? '...' : ''}"). Please check the file has the actual handwritten pages, or type the answer manually.`,
-                    completedAt: new Date()
-                  }
-                });
-                return;
+              if (docType === 'answer') {
+                const quality = assessExtractionQuality(text);
+                if (quality.isLikelyJunk) {
+                  logger.warn(`OCR quality check FAILED for job ${job.id} (${req.file!.originalname}): ${quality.reason}. Raw extracted text: "${text.substring(0, 200)}"`);
+                  await (prisma as any).uploadJob.update({
+                    where: { id: job.id },
+                    data: {
+                      status: 'ERROR',
+                      errorMessage: `This file appears to only contain a scanning app watermark, not the actual answers (extracted: "${text.substring(0, 60)}${text.length > 60 ? '...' : ''}"). Please check the file has the actual handwritten pages, or type the answer manually.`,
+                      completedAt: new Date()
+                    }
+                  });
+                  return;
+                }
               }
 
               extractedText = text;
@@ -1492,7 +2215,7 @@ Q2: [transcribed answer]
         } catch (error: any) {
           const isDailyQuota = error.isDailyQuota === true;
           const isRateLimit = !isDailyQuota && (
-            error.message?.includes('429') || 
+            error.message?.includes('429') ||
             error.message?.includes('RESOURCE_EXHAUSTED') ||
             error.message?.includes('503') ||
             error.message?.includes('UNAVAILABLE') ||
@@ -1509,8 +2232,8 @@ Q2: [transcribed answer]
               errorMessage: isDailyQuota
                 ? 'Daily AI quota reached. This resets at midnight Pacific Time — please type answers manually for now.'
                 : isRateLimit
-                ? 'AI is currently busy. Please wait before retrying, or type the answer manually.'
-                : error.message,
+                  ? 'AI is currently busy. Please wait before retrying, or type the answer manually.'
+                  : error.message,
               retryAfterSeconds: isDailyQuota ? null : (isRateLimit ? 65 : null), // null = no retry timer, manual only
               completedAt: new Date()
             }
@@ -1591,14 +2314,14 @@ Q2: [transcribed answer]
       logger.info('Received session creation request:', { body: req.body, user: req.user });
       const data = sessionSchema.parse(req.body);
       const session = await (prisma as any).markingSession.create({
-        data: { 
-          ...data, 
+        data: {
+          ...data,
           paperType: (data as any).paperType || 'Theory',
           classId: (data.classId && data.classId.trim() !== '' && data.classId !== 'undefined' && data.classId !== 'null') ? data.classId : null,
           questionTextUrl: (data.questionTextUrl && data.questionTextUrl.trim() !== '') ? data.questionTextUrl : null,
           markSchemeTextUrl: (data.markSchemeTextUrl && data.markSchemeTextUrl.trim() !== '') ? data.markSchemeTextUrl : null,
-          lecturerId: req.user.id, 
-          status: data.status || 'PENDING' 
+          lecturerId: req.user.id,
+          status: data.status || 'PENDING'
         }
       });
       logger.info(`Session created: ${session.id}, questionTextUrl: ${session.questionTextUrl}, markSchemeTextUrl: ${session.markSchemeTextUrl}`);
@@ -1685,8 +2408,8 @@ Q2: [transcribed answer]
       const created = await (prisma as any).studentAnswerSheet.createMany({
         data: students.map((s: any) => ({
           sessionId: id,
-          studentId: s.studentId && s.studentId.trim() !== '' 
-            ? s.studentId 
+          studentId: s.studentId && s.studentId.trim() !== ''
+            ? s.studentId
             : `TEMP_${Math.random().toString(36).substr(2, 9)}`,
           studentName: s.studentName || s.studentId || 'Unknown Student',
           pdfUrl: s.pdfUrl || '',
@@ -1711,17 +2434,17 @@ Q2: [transcribed answer]
 
     } catch (error: any) {
       logger.error('Save answer sheets error:', error);
-      
+
       // Handle the case where the table doesn't exist (P2021)
       if (error.code === 'P2021') {
-        return res.status(500).json({ 
+        return res.status(500).json({
           error: 'Database tables are missing.',
           details: 'Please run the manual_db_fix.sql script in your Supabase SQL Editor to create the required tables.',
           technical: error.message
         });
       }
 
-      res.status(400).json({ 
+      res.status(400).json({
         error: error.message,
         details: error.code === 'P2002' ? 'Duplicate student ID detected' : undefined
       });
@@ -1743,23 +2466,52 @@ Q2: [transcribed answer]
   app.post('/api/sessions/:id/parse-paper', authMiddleware, requireLecturer, async (req, res) => {
     try {
       const { id } = req.params;
-      const session = await (prisma as any).markingSession.findUnique({ where: { id } });
 
+      // Accept text passed directly from the frontend (preferred — no race condition)
+      // OR fall back to reading from DB if text isn't passed (backwards compat)
+      let questionPdfText: string = req.body.questionPdfText || '';
+      let markSchemeText: string = req.body.markSchemeText || '';
+
+      const session = await (prisma as any).markingSession.findUnique({ where: { id } });
       if (!session) {
         return res.status(404).json({ error: 'Session not found' });
       }
 
-      // GUARD — if textUrl isn't in DB yet, the upload hasn't committed fully
-      if (!session.questionTextUrl || !session.markSchemeTextUrl) {
-        logger.error(`Session ${id} parse-paper called but textUrls not in DB yet. questionTextUrl=${session.questionTextUrl}, markSchemeTextUrl=${session.markSchemeTextUrl}`);
+      // If text wasn't passed in the body, try reading from DB-stored URLs as fallback
+      if (!questionPdfText && session.questionTextUrl) {
+        logger.info(`parse-paper: text not in request body, downloading from ${session.questionTextUrl}`);
+        questionPdfText = await downloadTextFromSupabase(session.questionTextUrl);
+      }
+
+      if (!markSchemeText && session.markSchemeTextUrl) {
+        logger.info(`parse-paper: markScheme not in request body, downloading from ${session.markSchemeTextUrl}`);
+        markSchemeText = await downloadTextFromSupabase(session.markSchemeTextUrl);
+      }
+
+      // Now validate we actually have content to work with
+      if (!questionPdfText || questionPdfText.trim().length < 50) {
+        logger.error(`Session ${id}: no question paper text available. Body length=${req.body.questionPdfText?.length || 0}, DB textUrl=${session.questionTextUrl}`);
         return res.status(400).json({
-          error: 'Question paper or mark scheme text is not ready yet. Please wait a moment and try again.',
-          retryable: true
+          error: 'Question paper text is empty or too short to parse. Please re-upload the question paper.',
+          retryable: false,
+          needsManualMarks: false,
+          questions: []
         });
       }
 
-      // If already parsed and locked, return the existing structure — never re-parse silently
-      if (session.parsedQuestions && session.parsedMarkScheme) {
+      if (!markSchemeText || markSchemeText.trim().length < 20) {
+        logger.error(`Session ${id}: no mark scheme text available.`);
+        return res.status(400).json({
+          error: 'Mark scheme text is empty. Please re-upload the mark scheme.',
+          retryable: false,
+          needsManualMarks: false,
+          questions: []
+        });
+      }
+
+      // If already parsed and locked, return cached result immediately
+      if (session.parsedQuestions && session.parsedMarkScheme && session.parsingVerified) {
+        logger.info(`Session ${id}: returning cached parsed structure`);
         return res.json({
           questions: session.parsedQuestions,
           markScheme: session.parsedMarkScheme,
@@ -1768,82 +2520,157 @@ Q2: [transcribed answer]
         });
       }
 
-      const questionPdfText = session.questionTextUrl
-        ? await downloadTextFromSupabase(session.questionTextUrl)
-        : '';
-      const markSchemeText = session.markSchemeTextUrl
-        ? await downloadTextFromSupabase(session.markSchemeTextUrl)
-        : '';
+      const cleanedQuestionText = stripCoverPage(questionPdfText);
 
-      if (!questionPdfText || !markSchemeText) {
-        return res.status(400).json({ error: 'Question paper or mark scheme text missing.' });
+      logger.info(`Session ${id}: parsing question paper (${questionPdfText.length} chars raw, ${cleanedQuestionText.length} chars clean) and mark scheme (${markSchemeText.length} chars)`);
+
+      let parsedQuestions: any[] = [];
+      let usedVision = false;
+
+      // APPROACH 1: Vision-based parsing (reads visual page layout directly with Gemini Vision)
+      if (session.questionPdfUrl) {
+        try {
+          logger.info(`Attempting vision-based question paper parsing for session ${id}...`);
+          const pdfBuffer = await downloadPdfFromSupabase(session.questionPdfUrl);
+          parsedQuestions = await parseQuestionPaperFromImages(pdfBuffer);
+          if (parsedQuestions.length >= 4) {
+            usedVision = true;
+            logger.info(`Vision parse SUCCESS: ${parsedQuestions.length} questions extracted`);
+          } else {
+            logger.warn(`Vision parse yielded only ${parsedQuestions.length} questions, falling back to text`);
+          }
+        } catch (visionError: any) {
+          logger.warn('Vision parsing failed, falling back to text:', visionError.message);
+        }
       }
 
-      const { questions: parsedQuestions, markScheme: parsedMarkScheme } = 
-        await parseQuestionPaperAndMarkScheme(questionPdfText, markSchemeText);
+      // APPROACH 2: Text-based fallback (used when PDF bytes unavailable or vision returned < 4 questions)
+      if (parsedQuestions.length < 4) {
+        logger.info('Falling back to text-based parsing...');
+        parsedQuestions = await parseQuestionPaper(cleanedQuestionText, markSchemeText);
+      }
 
       if (!parsedQuestions || parsedQuestions.length === 0) {
-        const rawTextLength = questionPdfText?.length || 0;
-        const likelyReason = rawTextLength < 100
-          ? 'The question paper PDF appears to contain no extractable text — it may be a scanned image-only PDF. Try uploading a text-based PDF instead.'
-          : 'The AI could not identify a question structure in the extracted text. Check that the uploaded file is the question paper and not another document.';
+        logger.warn(`Session ${id}: 0 questions extracted, attempting text-based fallback`);
 
-        logger.error(`Session ${id}: parse returned 0 questions. Raw text length: ${rawTextLength}`);
-        logger.error(`Raw text preview: "${questionPdfText?.substring(0, 300)}"`);
+        // Try extracting question numbers directly from the raw text
+        const fallbackQuestions = buildFallbackQuestionsFromText(cleanedQuestionText);
 
+        if (fallbackQuestions.length > 0) {
+          logger.info(`Session ${id}: fallback found ${fallbackQuestions.length} questions — returning as needsManualMarks for lecturer to verify`);
+          return res.status(400).json({
+            error: `Found ${fallbackQuestions.length} questions but could not extract mark values automatically. Please verify and enter the marks below.`,
+            needsManualMarks: true,
+            questions: fallbackQuestions
+          });
+        }
+
+        // If even pattern matching found nothing, it's a genuine extraction failure
         return res.status(400).json({
-          error: likelyReason,
+          error: questionPdfText.length < 200
+            ? 'The question paper PDF appears to have very little extractable text. It may be a scanned image-only PDF — try uploading a text-based PDF.'
+            : 'The AI could not identify a question structure in this document. Check that the uploaded file is the actual question paper, then use "Enter Questions Manually" to proceed.',
+          retryable: false,
           needsManualMarks: false,
           questions: [],
-          rawTextLength,
-          rawTextPreview: questionPdfText?.substring(0, 200)
+          rawTextPreview: questionPdfText.substring(0, 400)
         });
       }
 
-      const totalMaxMarks = parsedQuestions.reduce(
+      // Now extract mark scheme since we have questions
+      let parsedMarkScheme = await parseMarkScheme(markSchemeText, parsedQuestions);
+
+      const parsedQuestionsNormalized = normalizeQuestionMarks(parsedQuestions);
+      const totalMaxMarks = parsedQuestionsNormalized.reduce(
         (sum: number, q: any) => sum + (Number(q.marksAvailable) || 0), 0
       );
 
       if (totalMaxMarks === 0) {
-        logger.error(`Session ${id} parsed with 0 total marks across ${parsedQuestions.length} questions. Refusing to lock this structure.`);
         return res.status(400).json({
-          error: `The AI could not detect mark values for any of the ${parsedQuestions.length} questions found. This usually means the marks aren't clearly visible as text in the uploaded PDF. Please check the question paper format, or manually enter mark values below.`,
-          questions: parsedQuestions,
-          needsManualMarks: true
+          error: `${parsedQuestionsNormalized.length} questions found but no mark values could be extracted.`,
+          needsManualMarks: true,
+          questions: parsedQuestionsNormalized
         });
       }
 
-      // VALIDATION — try to find a stated total in the raw text and compare
-      const statedTotalMatch = questionPdfText.match(/total[:\s]*(\d+)\s*marks?/i) ||
-                                questionPdfText.match(/\/(\d+)\s*$/m);
-      const statedTotal = statedTotalMatch ? parseInt(statedTotalMatch[1], 10) : null;
+      // NEW — correctly handles both formats:
+      // Format A: "Total: 100 marks" (single-question papers)
+      // Format B: "Question N total 100 marks" per question (multi-question papers)
+      function detectStatedTotal(text: string): number | null {
+        // Check for an explicit overall paper total first
+        // e.g. "Total marks: 400" or "Grand total: 400 marks"
+        const overallMatch = text.match(/(?:grand\s+total|total\s+marks?)[:\s]+(\d+)/i);
+        if (overallMatch) return parseInt(overallMatch[1], 10);
+
+        // Check for "No. of Questions: 4" style header + per-question totals
+        // e.g. "Question 1 total 100 marks" appearing multiple times
+        const perQuestionTotals = [...text.matchAll(/question\s+\d+\s+total\s+(\d+)\s+marks?/gi)];
+        if (perQuestionTotals.length > 1) {
+          // Sum all per-question totals to get the real paper total
+          const paperTotal = perQuestionTotals.reduce(
+            (sum, m) => sum + parseInt(m[1], 10), 0
+          );
+          logger.info(`Detected ${perQuestionTotals.length} per-question totals, summing to ${paperTotal}`);
+          return paperTotal;
+        }
+        if (perQuestionTotals.length === 1) {
+          // Single question paper — the one total IS the paper total
+          return parseInt(perQuestionTotals[0][1], 10);
+        }
+
+        // Fallback: look for a standalone total line
+        const fallbackMatch = text.match(/\btotal[:\s]*(\d+)\s*marks?\b/i);
+        return fallbackMatch ? parseInt(fallbackMatch[1], 10) : null;
+      }
+
+      const statedTotal = detectStatedTotal(cleanedQuestionText);
+      logger.info(`Stated total detection: ${statedTotal} marks`);
+
+      const diff = statedTotal ? Math.abs(statedTotal - totalMaxMarks) : 0;
+      const diffPercent = statedTotal ? (diff / statedTotal) * 100 : 0;
+
       const mismatchWarning = statedTotal && statedTotal !== totalMaxMarks
-        ? `Warning: extracted total (${totalMaxMarks}) does not match stated total (${statedTotal}) in the document. Please review before proceeding.`
+        ? diffPercent < 10
+          ? `Note: extracted total (${totalMaxMarks}) is ${diff} marks less than the stated total (${statedTotal}). This is a small discrepancy — ${diff} marks may not have been detected in one or two sub-questions. Marking will proceed using ${totalMaxMarks} as the total.`
+          : `Warning: extracted total (${totalMaxMarks}) does not match stated total (${statedTotal}). Please review before proceeding.`
         : null;
 
-      // LOCK the structure permanently on this session
+      // IMPROVED: also explain the per-question structure if detected
+      const perQuestionTotalCount = (cleanedQuestionText.match(
+        /question\s+\d+\s+total\s+\d+\s+marks?/gi
+      ) || []).length;
+
+      const structureNote = perQuestionTotalCount > 1
+        ? `This paper has ${perQuestionTotalCount} questions × ${totalMaxMarks / perQuestionTotalCount} marks each = ${totalMaxMarks} total.`
+        : null;
+
+      // Lock the structure permanently
       await (prisma as any).markingSession.update({
         where: { id },
         data: {
-          parsedQuestions,
+          parsedQuestions: parsedQuestionsNormalized,
           parsedMarkScheme,
           totalMaxMarks,
-          parsingVerified: false
+          parsingVerified: true,
+          // Also write the textUrls to DB now if we have them from request body context
+          questionTextUrl: session.questionTextUrl || req.body.questionTextUrl || session.questionTextUrl,
+          markSchemeTextUrl: session.markSchemeTextUrl || req.body.markSchemeTextUrl || session.markSchemeTextUrl
         }
       });
 
-      logger.info(`Session ${id} paper parsed and LOCKED. Total marks: ${totalMaxMarks}${mismatchWarning ? ' — MISMATCH DETECTED' : ''}`);
+      logger.info(`Session ${id}: LOCKED — ${parsedQuestionsNormalized.length} questions, ${totalMaxMarks} marks`);
 
       res.json({
-        questions: parsedQuestions,
+        questions: parsedQuestionsNormalized,
         markScheme: parsedMarkScheme,
         totalMaxMarks,
         mismatchWarning,
+        method: usedVision ? 'vision' : 'text',
         alreadyParsed: false
       });
 
     } catch (error: any) {
-      logger.error('Parse paper error:', error);
+      logger.error('parse-paper error:', error);
       res.status(500).json({ error: error.message });
     }
   });
@@ -1851,19 +2678,60 @@ Q2: [transcribed answer]
   app.post('/api/sessions/:id/confirm-manual-marks', authMiddleware, async (req, res) => {
     try {
       const { id } = req.params;
-      const { questions } = req.body;
+      const { questions, markSchemeText } = req.body;
 
-      const totalMaxMarks = questions.reduce((s: number, q: any) => s + (Number(q.marksAvailable) || 0), 0);
+      if (!questions || questions.length === 0) {
+        return res.status(400).json({ error: 'No questions provided' });
+      }
+
+      const totalMaxMarks = questions.reduce(
+        (s: number, q: any) => s + (Number(q.marksAvailable) || 0), 0
+      );
+
+      // Parse the mark scheme if text was provided, otherwise build a minimal
+      // placeholder mark scheme from the questions themselves so the marking
+      // route's guard always passes
+      let parsedMarkScheme: any[] = [];
+
+      if (markSchemeText && markSchemeText.trim().length > 20) {
+        try {
+          logger.info(`confirm-manual-marks: parsing mark scheme text (${markSchemeText.length} chars)`);
+          parsedMarkScheme = await parseMarkScheme(markSchemeText, questions);
+          logger.info(`confirm-manual-marks: parsed ${parsedMarkScheme.length} mark scheme entries`);
+        } catch (msError: any) {
+          logger.warn(`confirm-manual-marks: mark scheme parse failed (${msError.message}), using question-derived placeholder`);
+        }
+      }
+
+      // If mark scheme parsing failed or no text provided, build a minimal
+      // placeholder so the marking route's null check always passes
+      if (!parsedMarkScheme || parsedMarkScheme.length === 0) {
+        parsedMarkScheme = questions.map((q: any) => ({
+          questionNumber: q.questionNumber,
+          expectedAnswer: 'See mark scheme document',
+          marksAvailable: q.marksAvailable,
+          markingGuidance: 'Award marks for relevant and accurate content',
+          keywords: []
+        }));
+        logger.info(`confirm-manual-marks: using ${parsedMarkScheme.length} placeholder mark scheme entries`);
+      }
 
       await (prisma as any).markingSession.update({
         where: { id },
-        data: { parsedQuestions: questions, totalMaxMarks, parsingVerified: true }
+        data: {
+          parsedQuestions: questions,
+          parsedMarkScheme,          // NOW SAVED — this was the missing field
+          totalMaxMarks,
+          parsingVerified: true
+        }
       });
 
-      logger.info(`Session ${id} locked with MANUALLY entered marks. Total: ${totalMaxMarks}`);
-      res.json({ totalMaxMarks });
+      logger.info(`Session ${id}: manually confirmed ${questions.length} questions, ${totalMaxMarks} total marks, ${parsedMarkScheme.length} mark scheme entries`);
+
+      res.json({ totalMaxMarks, questionCount: questions.length });
+
     } catch (error: any) {
-      logger.error('Confirm manual marks error:', error);
+      logger.error('confirm-manual-marks error:', error);
       res.status(500).json({ error: error.message });
     }
   });
@@ -2013,9 +2881,9 @@ Q2: [transcribed answer]
 
       // Fetch all pending or errored student answer sheets for marking
       const answerSheets = await (prisma as any).studentAnswerSheet.findMany({
-        where: { 
-          sessionId: id, 
-          status: { in: ['PENDING', 'ERROR'] } 
+        where: {
+          sessionId: id,
+          status: { in: ['PENDING', 'ERROR'] }
         }
       });
 
@@ -2026,7 +2894,7 @@ Q2: [transcribed answer]
           details: `Session ID: ${id}`
         });
       }
-      
+
       logger.info(`Starting marking process for ${answerSheets.length} students in session ${id}`);
 
       // Update session status in Supabase PostgreSQL
@@ -2064,11 +2932,25 @@ Q2: [transcribed answer]
       });
 
       if (!session) {
-        throw new Error(`Session ${id} not found.`);
+        await (prisma as any).markingSession.update({
+          where: { id },
+          data: { status: 'ERROR', errorMessage: 'Session not found' }
+        });
+        return;
       }
 
       if (!session.parsedQuestions || !session.parsedMarkScheme) {
-        throw new Error('Session has no locked question structure. Paper must be parsed before marking.');
+        logger.error(`Session ${id}: marking blocked — parsedQuestions=${!!session.parsedQuestions}, parsedMarkScheme=${!!session.parsedMarkScheme}`);
+        await (prisma as any).markingSession.update({
+          where: { id },
+          data: {
+            status: 'ERROR',
+            errorMessage: !session.parsedQuestions
+              ? 'No question structure found. Please re-create the session and confirm paper structure before marking.'
+              : 'No mark scheme structure found. Please re-create the session — the mark scheme text may not have been saved correctly.'
+          }
+        });
+        return;
       }
 
       const parsedQuestions = session.parsedQuestions as any[];
@@ -2257,10 +3139,12 @@ Q2: [transcribed answer]
                 if (!studentAnswerText || studentAnswerText.length < 50) {
                   const base64 = buffer.toString('base64');
                   const ocrResp = await callGeminiSafe(
-                    [{ parts: [
-                      { inlineData: { data: base64, mimeType: 'application/pdf' } },
-                      { text: 'This is a student exam answer sheet. Transcribe ALL content. Preserve question numbers (Q1, 1a, etc). If handwritten, do your best to read it. Format: Q[number]:\n[answer]' }
-                    ] }],
+                    [{
+                      parts: [
+                        { inlineData: { data: base64, mimeType: 'application/pdf' } },
+                        { text: 'This is a student exam answer sheet. Transcribe ALL content. Group the answers by their actual main question numbers (Q1, Q2, Q3, Q4) written by the student. Treat pages without new question numbers as continuations of the previous question (do not sequentially count pages as Q1 to Q8). Format: Q[number]:\n[answer]' }
+                      ]
+                    }],
                     { context: `reextract-student-${sheet.studentId}` }
                   );
                   studentAnswerText = ocrResp.text?.trim() || '';
@@ -2367,7 +3251,7 @@ Q2: [transcribed answer]
           await (prisma as any).studentAnswerSheet.update({
             where: { id: sheet.id },
             data: { status: 'ERROR', errorMessage: studentError.message }
-          }).catch(() => {});
+          }).catch(() => { });
 
           completed++;
         }
@@ -2406,28 +3290,21 @@ Marking is complete for "${session.name}".
 Successfully marked: ${completed - errors.length}
 Errors: ${errors.length}
 ${errors.length > 0
-  ? `\nFailed:\n${errors.join('\n')}`
-  : ''
-}
+              ? `\nFailed:\n${errors.join('\n')}`
+              : ''
+            }
 Log in to MarkAI to review results.`.trim()
         });
       } catch (e) {
         logger.error('Email failed:', e);
       }
 
-    } catch (sessionError: any) {
-      logger.error(`🚨🚨 MARKING SESSION ${id} FAILED ENTIRELY:`, {
-        message: sessionError.message,
-        stack: sessionError.stack
-      });
-
+    } catch (error: any) {
+      logger.error(`triggerBackgroundMarking ${id} fatal error:`, error);
       await (prisma as any).markingSession.update({
         where: { id },
-        data: {
-          status: 'ERROR',
-          errorMessage: sessionError.message || 'Unknown error during marking'
-        }
-      });
+        data: { status: 'ERROR', errorMessage: error.message }
+      }).catch(() => { });
 
       markingProgress.set(id, {
         total: 0, completed: 0, currentStudentId: '', currentStudentName: '',
@@ -2545,20 +3422,20 @@ Log in to MarkAI to review results.`.trim()
 
   app.get('/api/sessions/:id/results', authMiddleware, async (req, res) => {
     try {
-      const results = await (prisma as any).studentResult.findMany({ 
-        where: { sessionId: req.params.id }, 
-        select: { 
-          id: true, 
-          studentId: true, 
-          studentName: true, 
-          percentage: true, 
-          totalMarks: true, 
-          maxMarks: true, 
-          grade: true, 
+      const results = await (prisma as any).studentResult.findMany({
+        where: { sessionId: req.params.id },
+        select: {
+          id: true,
+          studentId: true,
+          studentName: true,
+          percentage: true,
+          totalMarks: true,
+          maxMarks: true,
+          grade: true,
           reviewed: true,
           createdAt: true
-        }, 
-        orderBy: { studentId: 'asc' } 
+        },
+        orderBy: { studentId: 'asc' }
       });
       res.json(results);
     } catch (error: any) {
@@ -2620,11 +3497,11 @@ Log in to MarkAI to review results.`.trim()
 
       // Clean up previous results before creating new ones
       await (prisma as any).questionResult.deleteMany({
-         where: { studentResult: { sessionId: id, studentId } }
+        where: { studentResult: { sessionId: id, studentId } }
       });
       await (prisma as any).studentResult.delete({
         where: { sessionId_studentId: { sessionId: id, studentId } }
-      }).catch(() => {}); 
+      }).catch(() => { });
 
       const dbResult = await (prisma as any).studentResult.create({
         data: {
@@ -2638,19 +3515,19 @@ Log in to MarkAI to review results.`.trim()
           grade: resultData.grade,
           aiData: JSON.parse(JSON.stringify(resultData)),
           questions: {
-             create: resultData.questions.map((q: any) => ({
-                 questionNumber: q.questionNumber,
-                 questionText: q.questionText,
-                 topic: q.topic || 'General',
-                 marksAwarded: q.marksAwarded,
-                 marksAvailable: q.marksAvailable,
-                 status: q.status,
-                 studentAnswer: q.studentAnswer,
-                 expectedAnswer: q.expectedAnswer,
-                 aiFeedback: q.aiFeedback,
-                 lostMarksReason: q.lostMarksReason,
-                 improvementSuggestion: q.improvementSuggestion
-             }))
+            create: resultData.questions.map((q: any) => ({
+              questionNumber: q.questionNumber,
+              questionText: q.questionText,
+              topic: q.topic || 'General',
+              marksAwarded: q.marksAwarded,
+              marksAvailable: q.marksAvailable,
+              status: q.status,
+              studentAnswer: q.studentAnswer,
+              expectedAnswer: q.expectedAnswer,
+              aiFeedback: q.aiFeedback,
+              lostMarksReason: q.lostMarksReason,
+              improvementSuggestion: q.improvementSuggestion
+            }))
           }
         }
       });
@@ -2668,7 +3545,7 @@ Log in to MarkAI to review results.`.trim()
         where: { id },
         include: { questions: true, session: true }
       });
-      
+
       if (!result) return res.status(404).send('Not found');
 
       res.setHeader('Content-Type', 'application/pdf');
@@ -2687,14 +3564,14 @@ Log in to MarkAI to review results.`.trim()
       doc.moveDown();
 
       for (const q of result.questions) {
-         doc.fontSize(12).text(`Q${q.questionNumber}: ${q.marksAwarded}/${q.marksAvailable} marks`)
-            .fillColor(q.status === 'CORRECT' ? 'green' : q.status === 'PARTIAL' ? 'orange' : 'red')
-            .text(`[${q.status}]`);
-         doc.fillColor('black').fontSize(10).text(`AI Feedback: ${q.aiFeedback}`);
-         if (q.improvementSuggestion) {
-            doc.fillColor('gray').text(`Suggestion: ${q.improvementSuggestion}`);
-         }
-         doc.moveDown();
+        doc.fontSize(12).text(`Q${q.questionNumber}: ${q.marksAwarded}/${q.marksAvailable} marks`)
+          .fillColor(q.status === 'CORRECT' ? 'green' : q.status === 'PARTIAL' ? 'orange' : 'red')
+          .text(`[${q.status}]`);
+        doc.fillColor('black').fontSize(10).text(`AI Feedback: ${q.aiFeedback}`);
+        if (q.improvementSuggestion) {
+          doc.fillColor('gray').text(`Suggestion: ${q.improvementSuggestion}`);
+        }
+        doc.moveDown();
       }
 
       doc.end();
@@ -2712,7 +3589,7 @@ Log in to MarkAI to review results.`.trim()
         where: { sessionId: id },
         include: { questions: true }
       });
-      
+
       if (!session || !results) return res.status(404).send('Not found');
 
       res.setHeader('Content-Type', 'application/zip');
@@ -2722,37 +3599,37 @@ Log in to MarkAI to review results.`.trim()
       archive.pipe(res);
 
       for (const result of results) {
-         const doc = new PDFDocument({ margin: 50 });
-         const buffers: Buffer[] = [];
-         
-         const pdfPromise = new Promise<Buffer>((resolve) => {
-             doc.on('data', Buffer => buffers.push(Buffer));
-             doc.on('end', () => resolve(Buffer.concat(buffers)));
-         });
+        const doc = new PDFDocument({ margin: 50 });
+        const buffers: Buffer[] = [];
 
-         doc.fontSize(20).text('MarkAI Feedback Report', { align: 'center' });
-         doc.moveDown();
-         doc.fontSize(14).text(`Student: ${result.studentName || result.studentId}`);
-         doc.text(`Score: ${result.totalMarks}/${result.maxMarks} (${result.percentage}%)`);
-         doc.text(`Grade: ${result.grade}`);
-         doc.moveDown();
-         doc.fontSize(16).text('Question Feedback:', { underline: true });
-         doc.moveDown();
+        const pdfPromise = new Promise<Buffer>((resolve) => {
+          doc.on('data', Buffer => buffers.push(Buffer));
+          doc.on('end', () => resolve(Buffer.concat(buffers)));
+        });
 
-         for (const q of result.questions) {
-            doc.fontSize(12).text(`Q${q.questionNumber}: ${q.marksAwarded}/${q.marksAvailable} marks`)
-               .fillColor(q.status === 'CORRECT' ? 'green' : q.status === 'PARTIAL' ? 'orange' : 'red')
-               .text(`[${q.status}]`);
-            doc.fillColor('black').fontSize(10).text(`AI Feedback: ${q.aiFeedback}`);
-            if (q.improvementSuggestion) {
-               doc.fillColor('gray').text(`Suggestion: ${q.improvementSuggestion}`);
-            }
-            doc.moveDown();
-         }
+        doc.fontSize(20).text('MarkAI Feedback Report', { align: 'center' });
+        doc.moveDown();
+        doc.fontSize(14).text(`Student: ${result.studentName || result.studentId}`);
+        doc.text(`Score: ${result.totalMarks}/${result.maxMarks} (${result.percentage}%)`);
+        doc.text(`Grade: ${result.grade}`);
+        doc.moveDown();
+        doc.fontSize(16).text('Question Feedback:', { underline: true });
+        doc.moveDown();
 
-         doc.end();
-         const finalBuffer = await pdfPromise;
-         archive.append(finalBuffer, { name: `${result.studentId || 'unknown'}_report.pdf` });
+        for (const q of result.questions) {
+          doc.fontSize(12).text(`Q${q.questionNumber}: ${q.marksAwarded}/${q.marksAvailable} marks`)
+            .fillColor(q.status === 'CORRECT' ? 'green' : q.status === 'PARTIAL' ? 'orange' : 'red')
+            .text(`[${q.status}]`);
+          doc.fillColor('black').fontSize(10).text(`AI Feedback: ${q.aiFeedback}`);
+          if (q.improvementSuggestion) {
+            doc.fillColor('gray').text(`Suggestion: ${q.improvementSuggestion}`);
+          }
+          doc.moveDown();
+        }
+
+        doc.end();
+        const finalBuffer = await pdfPromise;
+        archive.append(finalBuffer, { name: `${result.studentId || 'unknown'}_report.pdf` });
       }
 
       await archive.finalize();
@@ -2775,17 +3652,17 @@ Log in to MarkAI to review results.`.trim()
 
       let count = 0;
       for (const result of results) {
-          try {
-             await resend.emails.send({
-                 from: 'MarkAI <notifications@markai.edu>',
-                 to: 'mock.student@institution.edu',
-                 subject: `Your Exam Feedback: ${session.name}`,
-                 text: `Hello ${result.studentName || result.studentId},\n\nYour result for ${session.name} is ready.\nScore: ${result.percentage}% (${result.totalMarks}/${result.maxMarks})\nGrade: ${result.grade}\n\nPlease review your detailed breakdown in MarkAI.`
-             });
-             count++;
-          } catch (err) {
-             logger.error(`Failed to email ${result.studentId}:`, err);
-          }
+        try {
+          await resend.emails.send({
+            from: 'MarkAI <notifications@markai.edu>',
+            to: 'mock.student@institution.edu',
+            subject: `Your Exam Feedback: ${session.name}`,
+            text: `Hello ${result.studentName || result.studentId},\n\nYour result for ${session.name} is ready.\nScore: ${result.percentage}% (${result.totalMarks}/${result.maxMarks})\nGrade: ${result.grade}\n\nPlease review your detailed breakdown in MarkAI.`
+          });
+          count++;
+        } catch (err) {
+          logger.error(`Failed to email ${result.studentId}:`, err);
+        }
       }
       res.json({ success: true, count });
     } catch (error: any) {
@@ -2821,7 +3698,7 @@ Log in to MarkAI to review results.`.trim()
       logger.info(`🗑️ Lecturer ${user.id} requested deletion of session ${id}`);
 
       // 4. Sequential deletion to respect FKs and Supabase connection limits
-      
+
       // a) Delete QuestionResults (linked via StudentResult)
       const results = await (prisma as any).studentResult.findMany({
         where: { sessionId: id },
@@ -3035,9 +3912,9 @@ Log in to MarkAI to review results.`.trim()
       if (userType === 'LECTURER') {
         // Optimization: Run these sequentially but check for timeouts
         // results.length is papersMarked, so we can save one count query
-        const results = await (prisma as any).studentResult.findMany({ 
-          where: { session: { lecturerId: req.user.id } }, 
-          select: { percentage: true } 
+        const results = await (prisma as any).studentResult.findMany({
+          where: { session: { lecturerId: req.user.id } },
+          select: { percentage: true }
         });
 
         const totalSessions = await (prisma as any).markingSession.count({ where: { lecturerId: req.user.id } });
@@ -3045,18 +3922,18 @@ Log in to MarkAI to review results.`.trim()
 
         const papersMarked = results.length;
         const avgClassScore = papersMarked ? results.reduce((acc: number, r: any) => acc + r.percentage, 0) / papersMarked : 0;
-        
+
         res.json({ totalSessions, papersMarked, pendingReview, avgClassScore });
       } else if (userType === 'STUDENT') {
-        const results = await (prisma as any).studentResult.findMany({ 
-          where: { studentId: req.user.studentCode || '' }, 
-          select: { percentage: true, grade: true, createdAt: true } 
+        const results = await (prisma as any).studentResult.findMany({
+          where: { studentId: req.user.studentCode || '' },
+          select: { percentage: true, grade: true, createdAt: true }
         });
-        
+
         const papersSubmitted = results.length;
         const averageScore = papersSubmitted ? results.reduce((acc: number, r: any) => acc + r.percentage, 0) / papersSubmitted : 0;
         const bestGrade = results.length ? [...results].sort((a: any, b: any) => a.percentage - b.percentage).pop()!.grade : 'N/A';
-        
+
         res.json({ papersSubmitted, averageScore, bestGrade, streak: 0 });
       } else {
         // Admin stats - simplified

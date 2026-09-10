@@ -172,6 +172,7 @@ const NewSessionPage = () => {
   const [markingStrictness, setMarkingStrictness] = useState('Standard');
   const [feedbackDetail, setFeedbackDetail] = useState('Detailed');
   const [isMarking, setIsMarking] = useState(false);
+  const [markingError, setMarkingError] = useState<string | null>(null);
   const [markingProgress, setMarkingProgress] = useState({
     total: 0, 
     completed: 0,
@@ -266,7 +267,8 @@ const NewSessionPage = () => {
 
   const handleFileUpload = async (
     file: File,
-    setter: (val: any) => void
+    setter: (val: any) => void,
+    docType: string
   ) => {
     if (file.type !== 'application/pdf') {
       alert('Only PDF files are allowed');
@@ -285,6 +287,7 @@ const NewSessionPage = () => {
 
     const formData = new FormData();
     formData.append('file', file);
+    formData.append('docType', docType);
 
     try {
       const data = await apiUploadAndPoll(
@@ -348,6 +351,7 @@ const NewSessionPage = () => {
 
     const formData = new FormData();
     formData.append('file', file);
+    formData.append('docType', 'answer');
 
     try {
       const result = await apiUploadAndPoll(
@@ -587,9 +591,36 @@ const NewSessionPage = () => {
     setParseStatus('parsing');
     setParseError(null);
 
+    // Use text already in frontend state from the Step 2 uploads
+    // This eliminates the DB race condition entirely
+    const questionText = questionPaper?.extractedText || '';
+    const markSchemeTextContent = markScheme?.extractedText || '';
+
+    console.log('parsePaperStructure called with:', {
+      sessionId: activeId,
+      questionTextLength: questionText.length,
+      markSchemeTextLength: markSchemeTextContent.length,
+      questionTextPreview: questionText.substring(0, 100)
+    });
+
+    if (!questionText || questionText.trim().length < 50) {
+      setParseError('Question paper text is not available. Please go back and re-upload the question paper.');
+      setParseStatus('failed');
+      return;
+    }
+
     try {
       const res = await apiFetch(`/api/sessions/${activeId}/parse-paper`, {
-        method: 'POST'
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({
+          // Send text directly — no DB read needed on the backend
+          questionPdfText: questionText,
+          markSchemeText: markSchemeTextContent,
+          // Also send URLs so backend can store them on the session for future re-marks
+          questionTextUrl: questionPaper?.textUrl,
+          markSchemeTextUrl: markScheme?.textUrl
+        })
       });
       const data = await res.json();
 
@@ -605,7 +636,7 @@ const NewSessionPage = () => {
         if (data.needsManualMarks && data.questions?.length > 0) {
           // Questions found but no marks detected — show manual marks entry
           setManualQuestions(
-            data.questions.map((q: any) => ({ ...q, marksAvailable: 2 }))
+            data.questions.map((q: any) => ({ ...q, marksAvailable: q.marksAvailable || 2 }))
           );
           setParseStatus('needs_manual');
         } else {
@@ -628,6 +659,10 @@ const NewSessionPage = () => {
       setParseStatus('success');
 
     } catch (error: any) {
+      if (retryCount < 2) {
+        await new Promise(resolve => setTimeout(resolve, 3000));
+        return parsePaperStructure(activeId, retryCount + 1);
+      }
       setParseError('Network error while parsing paper. Please check your connection and try again.');
       setParseStatus('failed');
     }
@@ -640,7 +675,11 @@ const NewSessionPage = () => {
     try {
       const res = await apiFetch(`/api/sessions/${sessionId}/confirm-manual-marks`, {
         method: 'POST',
-        body: JSON.stringify({ questions: manualQuestions })
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({
+          questions: manualQuestions,
+          markSchemeText: markScheme?.extractedText || ''
+        })
       });
       const data = await res.json();
 
@@ -652,7 +691,7 @@ const NewSessionPage = () => {
 
       setPaperStructure({
         totalMaxMarks: data.totalMaxMarks,
-        questionCount: manualQuestions.length,
+        questionCount: data.questionCount || manualQuestions.length,
         mismatchWarning: null
       });
       setParseStatus('success');
@@ -664,7 +703,20 @@ const NewSessionPage = () => {
   };
 
   const handleStartMarking = async () => {
+    // Check paperStructure object directly — it is set by BOTH the auto-parse path
+    // and the manual confirm path, so it is reliable. parseStatus can lag after
+    // confirm-manual-marks returns before the state update commits.
+    if (!paperStructure || !paperStructure.totalMaxMarks || paperStructure.totalMaxMarks === 0) {
+      setMarkingError(
+        paperStructure
+          ? 'Paper total marks is 0. Please go back and enter valid marks before starting.'
+          : 'Paper structure must be confirmed before marking. Please complete the step above.'
+      );
+      return;
+    }
+
     setIsMarking(true);
+    setMarkingError(null);
 
     try {
       if (!sessionId) {
@@ -674,6 +726,7 @@ const NewSessionPage = () => {
       // Start marking
       const markRes = await apiFetch(`/api/sessions/${sessionId}/mark`, {
         method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({
           questionPdfText: questionPaper.extractedText,
           markSchemeText: markScheme.extractedText
@@ -695,7 +748,7 @@ const NewSessionPage = () => {
 
     } catch (error: any) {
       setIsMarking(false);
-      alert(error.message || 'Failed to start marking. Please try again.');
+      setMarkingError(error.message || 'Failed to start marking. Please try again.');
     }
   };
 
@@ -1075,13 +1128,13 @@ const NewSessionPage = () => {
                 <UploadZone 
                   title="Question Paper" 
                   fileData={questionPaper} 
-                  onUpload={(f: File) => handleFileUpload(f, setQuestionPaper)}
+                  onUpload={(f: File) => handleFileUpload(f, setQuestionPaper, 'question')}
                   icon={FileText} 
                 />
                 <UploadZone 
                   title="Mark Scheme" 
                   fileData={markScheme} 
-                  onUpload={(f: File) => handleFileUpload(f, setMarkScheme)}
+                  onUpload={(f: File) => handleFileUpload(f, setMarkScheme, 'markscheme')}
                   icon={Zap} 
                 />
               </div>
@@ -1250,9 +1303,11 @@ const NewSessionPage = () => {
                               />
                             )}
                             {s.previewOpen && (
-                              <div className="mt-4 p-4 bg-bg rounded-lg text-[10px] text-text-muted max-h-32 overflow-y-auto font-mono whitespace-pre-wrap border border-border">
-                                {s.extractedText || "No text extracted."}
-                              </div>
+                               <div className="mt-2 h-56 rounded-lg border border-slate-200 bg-slate-50 p-3 overflow-y-auto">
+                                 <pre className="text-xs text-slate-700 whitespace-pre-wrap break-words leading-relaxed font-sans">
+                                   {s.extractedText || ''}
+                                 </pre>
+                               </div>
                             )}
                           </td>
                           <td className="px-6 py-4 text-right">
@@ -1749,27 +1804,32 @@ const NewSessionPage = () => {
                   </div>
                 )}
 
+                {markingError && (
+                  <div className="mb-3 p-3 bg-red-50 border border-red-200 rounded-lg flex items-start gap-2">
+                    <AlertTriangle size={14} className="text-red-500 shrink-0 mt-0.5" />
+                    <p className="text-xs text-red-600">{markingError}</p>
+                  </div>
+                )}
+                
                 <div className="flex gap-4 pt-4">
                   <button onClick={() => setCurrentStep(3)} className="btn-ghost flex-1">Back</button>
                   <button
                     onClick={handleStartMarking}
                     disabled={
+                      isMarking ||
                       parseStatus === 'parsing' ||
+                      !paperStructure ||
                       uploadedSheets.some(s => !s.extractedText || s.extractedText.trim().length < 5)
                     }
                     className={`px-6 py-3 rounded-xl font-semibold text-sm transition-all flex-1 ${
                       parseStatus === 'parsing'
                         ? 'bg-slate-300 text-slate-500 cursor-not-allowed'
-                        : parseStatus === 'success'
+                        : paperStructure
                         ? 'bg-accent text-navy hover:bg-accent/90'
                         : 'bg-navy text-white hover:bg-navy/90'
                     }`}
                   >
-                    {parseStatus === 'parsing'
-                      ? 'Parsing Paper Structure...'
-                      : parseStatus === 'success'
-                      ? 'Save & Start Marking'
-                      : 'Continue Without Parsing'}
+                    {isMarking ? 'Starting...' : 'Save & Start Marking'}
                   </button>
                 </div>
                 {hasEmptyAnswers && (
