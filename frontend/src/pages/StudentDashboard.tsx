@@ -139,7 +139,7 @@ const StudentDashboard = () => {
                    </span>
                 </div>
              </div>
-             <div className="h-64">
+             <div style={{ width: '100%', height: 280 }}>
                 <ResponsiveContainer width="100%" height="100%">
                    <AreaChart data={chartData}>
                       <defs>

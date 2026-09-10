@@ -337,7 +337,7 @@ const ProgressPage = () => {
                  </span>
               </div>
            </div>
-           <div className="h-64">
+           <div style={{ width: '100%', height: 280 }}>
               <ResponsiveContainer width="100%" height="100%">
                  <AreaChart data={analytics?.timeline}>
                     <defs>
@@ -362,7 +362,7 @@ const ProgressPage = () => {
               <h3 className="text-sm font-bold text-navy uppercase tracking-[0.2em]">Subject Strengths</h3>
               <BarChart2 size={16} className="text-text-muted" />
            </div>
-           <div className="h-64">
+           <div style={{ width: '100%', height: 280 }}>
               <ResponsiveContainer width="100%" height="100%">
                  <BarChart data={analytics?.subjects} layout="vertical">
                     <XAxis type="number" hide domain={[0, 100]} />

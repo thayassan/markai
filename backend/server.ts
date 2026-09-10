@@ -176,6 +176,8 @@ interface KeyState {
   label: string;
 }
 
+const GEMINI_MODEL = process.env.GEMINI_MODEL || 'gemini-2.0-flash';
+
 class GeminiKeyPool {
   private keys: KeyState[] = [];
   private currentIndex = 0;
@@ -276,7 +278,7 @@ class GeminiKeyPool {
           if (responseMimeType !== undefined) configObj.responseMimeType = responseMimeType;
 
           const response = await keyState.client.models.generateContent({
-            model: 'gemini-3.1-flash-lite',
+            model: GEMINI_MODEL,
             contents,
             config: configObj
           });
@@ -406,7 +408,7 @@ async function verifyGeminiModel(): Promise<boolean> {
     return true;
   } catch (error: any) {
     logger.error('❌ Gemini model verification FAILED:', error.message);
-    logger.error('This means gemini-3.1-flash-lite may not be available with your API key/region.');
+    logger.error(`This means ${GEMINI_MODEL} may not be available with your API key/region.`);
     return false;
   }
 }
@@ -3956,9 +3958,17 @@ Log in to MarkAI to review results.`.trim()
       const { prompt, context } = req.body;
       const fullPrompt = context ? `AI context: ${JSON.stringify(context)}. ${prompt}` : prompt;
       const response = await groqWithRetry(fullPrompt);
-      res.json({ text: response.text });
+      res.json({ text: response.text, insights: response.text });
     } catch (error: any) {
-      res.status(500).json({ error: error.message });
+      logger.error('/api/ai/generate error:', error?.message || error);
+      // Return 200 with null so the frontend degrades gracefully
+      // instead of crashing the TanStack query with undefined or 500
+      return res.status(200).json({
+        text: null,
+        insights: null,
+        fallback: true,
+        error: 'AI insights temporarily unavailable'
+      });
     }
   });
 
