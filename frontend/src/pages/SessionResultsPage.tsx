@@ -1,4 +1,4 @@
-import React, { useState, useMemo } from 'react';
+import React, { useState, useMemo, useEffect, useCallback } from 'react';
 import { DashboardLayout } from '@/src/components/DashboardLayout';
 import { 
   ArrowLeft, Download, CheckCircle2, Mail, Users, 
@@ -62,22 +62,86 @@ const SessionResultsPage = () => {
     refetchInterval: 3000
   });
 
-  // AI Insights Query
-  const { data: aiInsightsData, isLoading: aiLoading, refetch: refetchAiInsights } = useQuery({
-    queryKey: ['sessionAiInsights', id],
-    queryFn: async () => {
+  // AI Insights Async Polling Pattern
+  const [insightsJobId, setInsightsJobId] = useState<string | null>(null);
+  const [aiInsights, setAiInsights] = useState<string | null>(null);
+  const [insightsLoading, setInsightsLoading] = useState(false);
+  const [insightsFallback, setInsightsFallback] = useState(false);
+
+  const startInsights = useCallback(async () => {
+    if (!id) return;
+    setInsightsLoading(true);
+    setInsightsFallback(false);
+    try {
       const res = await apiFetch('/api/ai/generate', {
         method: 'POST',
         body: JSON.stringify({ sessionId: id })
       });
-      if (!res.ok) throw new Error(`HTTP ${res.status}`);
       const data = await res.json();
-      return data ?? { insights: null, fallback: true }; // never return undefined
-    },
-    enabled: !!results && results.length > 0,
-    retry: false,
-    staleTime: 5 * 60 * 1000
-  });
+
+      if (data.insights !== undefined) {
+        // Synchronous fallback response
+        setAiInsights(data.insights);
+        setInsightsFallback(data.fallback);
+        setInsightsLoading(false);
+      } else if (data.jobId) {
+        setInsightsJobId(data.jobId);
+      }
+    } catch {
+      setInsightsFallback(true);
+      setInsightsLoading(false);
+    }
+  }, [id]);
+
+  // Trigger the insights job when results become available
+  useEffect(() => {
+    if (!id || insightsJobId || !results || results.length === 0 || aiInsights) return;
+    startInsights();
+  }, [id, results, insightsJobId, aiInsights, startInsights]);
+
+  // Poll for job completion
+  useEffect(() => {
+    if (!insightsJobId) return;
+
+    const interval = setInterval(async () => {
+      try {
+        const res = await apiFetch(`/api/upload/status/${insightsJobId}`);
+        const data = await res.json();
+
+        if (data.status === 'COMPLETE') {
+          clearInterval(interval);
+          const result = JSON.parse(data.text || '{}');
+          setAiInsights(result.insights || null);
+          setInsightsFallback(result.fallback || false);
+          setInsightsLoading(false);
+          setInsightsJobId(null);
+        } else if (data.status === 'ERROR') {
+          clearInterval(interval);
+          setInsightsFallback(true);
+          setInsightsLoading(false);
+          setInsightsJobId(null);
+        }
+      } catch {
+        clearInterval(interval);
+        setInsightsFallback(true);
+        setInsightsLoading(false);
+        setInsightsJobId(null);
+      }
+    }, 2000);
+
+    // Stop polling after 60 seconds
+    const timeout = setTimeout(() => {
+      clearInterval(interval);
+      setInsightsFallback(true);
+      setInsightsLoading(false);
+      setInsightsJobId(null);
+    }, 60000);
+
+    return () => {
+      clearInterval(interval);
+      clearTimeout(timeout);
+    };
+  }, [insightsJobId]);
 
   // Start marking handler
   const handleStartMarking = async () => {
@@ -606,26 +670,27 @@ const SessionResultsPage = () => {
 
            <div className="card p-8 bg-bg/50 border-2 border-accent/10 relative overflow-hidden">
               {hasResults ? (
-                aiLoading ? (
+                insightsLoading ? (
                   <div className="py-20 text-center space-y-4">
                     <Loader2 className="animate-spin mx-auto text-accent" size={32} />
                     <p className="text-xs font-bold text-navy uppercase tracking-widest">Generating AI Insights...</p>
                   </div>
                 ) : (
                   <div className="space-y-6">
-                     {aiInsightsData?.insights ? (
+                     {aiInsights ? (
                        <div className="whitespace-pre-wrap text-sm text-navy leading-relaxed">
-                         {aiInsightsData.insights}
+                         {aiInsights}
                        </div>
                      ) : (
                        <p className="text-xs text-text-muted text-center py-4">
-                         {aiInsightsData?.fallback
+                         {insightsFallback
                            ? 'AI insights temporarily unavailable.'
                            : 'Generating insights...'}
                        </p>
                      )}
                      <button 
-                       onClick={() => refetchAiInsights()} 
+                       onClick={() => startInsights()} 
+                       disabled={insightsLoading}
                        className="btn-ghost w-full py-2 text-[10px] uppercase font-bold tracking-widest border border-border"
                      >
                        Regenerate Analysis

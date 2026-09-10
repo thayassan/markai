@@ -3942,42 +3942,89 @@ Log in to MarkAI to review results.`.trim()
       const { sessionId, prompt: customPrompt, context } = req.body;
 
       if (sessionId) {
-        const session = await prisma.markingSession.findUnique({
-          where: { id: sessionId },
-          include: { results: { include: { questions: true } } }
+        // Create a job and respond IMMEDIATELY — no waiting for Gemini (prevents 504 Gateway Timeout)
+        const job = await (prisma as any).uploadJob.create({
+          data: {
+            status: 'PROCESSING',
+            filename: `ai-insights-${sessionId}`
+          }
         });
 
-        if (!session || !session.results?.length) {
-          return res.status(200).json({ insights: null, text: null, fallback: true });
-        }
+        res.json({ jobId: job.id, status: 'PROCESSING' });
 
-        // Build a concise prompt from session data
-        const totalStudents = session.results.length;
-        const avgScore = session.results.reduce((s: number, r: any) => s + r.percentage, 0) / totalStudents;
-        const passRate = (session.results.filter((r: any) => r.percentage >= 50).length / totalStudents) * 100;
+        // Background processing — after response is already sent
+        (async () => {
+          try {
+            const session = await (prisma as any).markingSession.findUnique({
+              where: { id: sessionId },
+              include: { results: true }
+            });
 
-        const prompt = `You are an educational data analyst. Analyse this exam session and provide insights.
+            if (!session || !session.results?.length) {
+              await (prisma as any).uploadJob.update({
+                where: { id: job.id },
+                data: {
+                  status: 'COMPLETE',
+                  extractedText: JSON.stringify({ insights: null, fallback: true }),
+                  completedAt: new Date()
+                }
+              });
+              return;
+            }
 
-Session: ${session.name}
+            const totalStudents = session.results.length;
+            const avgScore = session.results.reduce((s: number, r: any) => s + r.percentage, 0) / totalStudents;
+            const passRate = (session.results.filter((r: any) => r.percentage >= 50).length / totalStudents) * 100;
+            const highest = Math.max(...session.results.map((r: any) => r.percentage));
+            const lowest = Math.min(...session.results.map((r: any) => r.percentage));
+
+            const prompt = `You are an educational analyst. Provide a concise 3-paragraph class performance summary for a lecturer.
+
+Exam: ${session.name}
 Subject: ${session.subject}
 Students: ${totalStudents}
-Average Score: ${avgScore.toFixed(1)}%
+Average: ${avgScore.toFixed(1)}%
 Pass Rate: ${passRate.toFixed(1)}%
+Highest: ${highest.toFixed(1)}%
+Lowest: ${lowest.toFixed(1)}%
 
-Provide a brief 3-paragraph analysis:
-1. Overall class performance summary
-2. Key strengths observed
-3. Areas needing improvement and recommendations
+Write 3 short paragraphs:
+1. Overall performance summary
+2. Key strengths
+3. Areas for improvement and recommendations
 
-Keep it concise and actionable for a lecturer.`;
+Be specific and actionable. Keep each paragraph to 2-3 sentences.`;
 
-        const response = await callGeminiSafe(prompt, {
-          context: 'ai-insights',
-          temperature: 0.3
-        });
+            const response = await callGeminiSafe(prompt, {
+              context: 'ai-insights',
+              temperature: 0.3
+            });
 
-        const insights = response.text || null;
-        return res.status(200).json({ insights, text: insights, fallback: false });
+            const insights = response.text || null;
+
+            await (prisma as any).uploadJob.update({
+              where: { id: job.id },
+              data: {
+                status: 'COMPLETE',
+                extractedText: JSON.stringify({ insights, fallback: false }),
+                completedAt: new Date()
+              }
+            });
+
+          } catch (error: any) {
+            logger.error('AI insights background job failed:', error.message);
+            await (prisma as any).uploadJob.update({
+              where: { id: job.id },
+              data: {
+                status: 'COMPLETE',
+                extractedText: JSON.stringify({ insights: null, fallback: true }),
+                completedAt: new Date()
+              }
+            });
+          }
+        })();
+
+        return;
       }
 
       if (customPrompt) {
@@ -3994,18 +4041,11 @@ Keep it concise and actionable for a lecturer.`;
         }
       }
 
-      return res.status(200).json({ insights: null, text: null, fallback: true });
+      return res.status(200).json({ insights: null, fallback: true });
 
     } catch (error: any) {
       logger.error('/api/ai/generate error:', error.message);
-      // NEVER return 500 — always return 200 with null insights
-      // so the TanStack query doesn't crash with undefined
-      return res.status(200).json({
-        insights: null,
-        text: null,
-        fallback: true,
-        errorHint: error.message?.substring(0, 100)
-      });
+      return res.status(200).json({ insights: null, fallback: true });
     }
   });
 
