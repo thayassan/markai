@@ -133,6 +133,29 @@ export const Navbar = () => {
   );
 };
 
+const FooterLink = ({ to, children }: { to: string; children: React.ReactNode }) => (
+  <motion.div whileHover={{ x: 4 }} transition={{ duration: 0.15, ease: 'easeOut' }}>
+    <Link
+      to={to}
+      onClick={() => window.scrollTo({ top: 0, behavior: 'smooth' })}
+      className="hover:text-white transition-colors block"
+    >
+      {children}
+    </Link>
+  </motion.div>
+);
+
+const FooterExternalLink = ({ href, children }: { href: string; children: React.ReactNode }) => (
+  <motion.div whileHover={{ x: 4 }} transition={{ duration: 0.15, ease: 'easeOut' }}>
+    <a
+      href={href}
+      className="hover:text-white transition-colors block"
+    >
+      {children}
+    </a>
+  </motion.div>
+);
+
 export const Footer = () => {
   return (
     <footer className="bg-navy text-white pt-20 pb-10">
@@ -152,63 +175,27 @@ export const Footer = () => {
         <div>
           <h4 className="font-serif font-bold mb-6 text-white">Product</h4>
           <ul className="space-y-4 text-sm text-gray-300">
-            <li>
-              <motion.div whileHover={{ x: 4 }} transition={{ duration: 0.15, ease: 'easeOut' }}>
-                <Link to="/features" className="hover:text-white transition-colors">Features</Link>
-              </motion.div>
-            </li>
-            <li>
-              <motion.div whileHover={{ x: 4 }} transition={{ duration: 0.15, ease: 'easeOut' }}>
-                <Link to="/pricing" className="hover:text-white transition-colors">Pricing</Link>
-              </motion.div>
-            </li>
-            <li>
-              <motion.div whileHover={{ x: 4 }} transition={{ duration: 0.15, ease: 'easeOut' }}>
-                <Link to="/lecturer/sessions/new" className="hover:text-white transition-colors">AI Marking</Link>
-              </motion.div>
-            </li>
+            <li><FooterLink to="/features">Features</FooterLink></li>
+            <li><FooterLink to="/pricing">Pricing</FooterLink></li>
+            <li><FooterLink to="/lecturer/sessions/new">AI Marking</FooterLink></li>
           </ul>
         </div>
 
         <div>
           <h4 className="font-serif font-bold mb-6 text-white">Support</h4>
           <ul className="space-y-4 text-sm text-gray-300">
-            <li>
-              <motion.div whileHover={{ x: 4 }} transition={{ duration: 0.15, ease: 'easeOut' }}>
-                <a href="mailto:support@markai.demo" className="hover:text-white transition-colors">Help Center</a>
-              </motion.div>
-            </li>
-            <li>
-              <motion.div whileHover={{ x: 4 }} transition={{ duration: 0.15, ease: 'easeOut' }}>
-                <Link to="/docs" className="hover:text-white transition-colors">API Docs</Link>
-              </motion.div>
-            </li>
-            <li>
-              <motion.div whileHover={{ x: 4 }} transition={{ duration: 0.15, ease: 'easeOut' }}>
-                <a href="mailto:contact@markai.demo" className="hover:text-white transition-colors">Contact</a>
-              </motion.div>
-            </li>
+            <li><FooterExternalLink href="mailto:support@markai.demo">Help Center</FooterExternalLink></li>
+            <li><FooterLink to="/docs">API Docs</FooterLink></li>
+            <li><FooterExternalLink href="mailto:contact@markai.demo">Contact</FooterExternalLink></li>
           </ul>
         </div>
 
         <div>
           <h4 className="font-serif font-bold mb-6 text-white">Company</h4>
           <ul className="space-y-4 text-sm text-gray-300">
-            <li>
-              <motion.div whileHover={{ x: 4 }} transition={{ duration: 0.15, ease: 'easeOut' }}>
-                <Link to="/about" className="hover:text-white transition-colors">About Us</Link>
-              </motion.div>
-            </li>
-            <li>
-              <motion.div whileHover={{ x: 4 }} transition={{ duration: 0.15, ease: 'easeOut' }}>
-                <Link to="/careers" className="hover:text-white transition-colors">Careers</Link>
-              </motion.div>
-            </li>
-            <li>
-              <motion.div whileHover={{ x: 4 }} transition={{ duration: 0.15, ease: 'easeOut' }}>
-                <Link to="/privacy" className="hover:text-white transition-colors">Privacy</Link>
-              </motion.div>
-            </li>
+            <li><FooterLink to="/about">About Us</FooterLink></li>
+            <li><FooterLink to="/careers">Careers</FooterLink></li>
+            <li><FooterLink to="/privacy">Privacy</FooterLink></li>
           </ul>
         </div>
       </div>
@@ -216,12 +203,8 @@ export const Footer = () => {
       <div className="max-w-7xl mx-auto px-6 mt-20 pt-8 border-t border-white/10 flex flex-col md:flex-row justify-between items-center gap-4 text-xs text-gray-300 uppercase tracking-widest">
         <p>© 2026 MarkAI Technologies. All rights reserved.</p>
         <div className="flex gap-8">
-          <motion.div whileHover={{ x: 4 }} transition={{ duration: 0.15, ease: 'easeOut' }}>
-            <Link to="/terms" className="hover:text-white transition-colors">Terms of Service</Link>
-          </motion.div>
-          <motion.div whileHover={{ x: 4 }} transition={{ duration: 0.15, ease: 'easeOut' }}>
-            <Link to="/privacy" className="hover:text-white transition-colors">Privacy Policy</Link>
-          </motion.div>
+          <FooterLink to="/terms">Terms of Service</FooterLink>
+          <FooterLink to="/privacy">Privacy Policy</FooterLink>
         </div>
       </div>
     </footer>
