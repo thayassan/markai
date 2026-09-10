@@ -177,9 +177,11 @@ interface KeyState {
 }
 
 const GEMINI_MODEL = process.env.GEMINI_MODEL || 'gemini-2.0-flash';
+const RPM_LIMIT = 10;   // actual limit is 15 RPM, use 10 as safe margin
+const RPD_LIMIT = 195;  // actual limit is 200 RPD, use 195 as safe margin
 
 class GeminiKeyPool {
-  private keys: KeyState[] = [];
+  public keys: KeyState[] = []; // public so diagnostic endpoint can inspect it
   private currentIndex = 0;
   private waitingCallsCount = 0;
 
@@ -191,52 +193,68 @@ class GeminiKeyPool {
       process.env.GEMINI_API_KEY_4,
       process.env.GEMINI_API_KEY_5,
       process.env.GEMINI_API_KEY // fallback single key
-    ].filter((k): k is string => !!k);
+    ].filter((k): k is string => !!k && k.trim().length > 0);
+
+    // Log exactly which keys were found
+    logger.info(`GeminiKeyPool: found ${rawKeys.length} keys from environment`);
+    logger.info(`Key prefixes: ${rawKeys.map((k, i) => `key-${i+1}:${k.substring(0,8)}...`).join(', ')}`);
 
     if (rawKeys.length === 0) {
-      throw new Error('No Gemini API keys configured. Set GEMINI_API_KEY_1 through GEMINI_API_KEY_5.');
+      logger.error('NO GEMINI API KEYS FOUND — check Railway Variables');
     }
 
     this.keys = rawKeys.map((key, i) => ({
       key,
       client: new GoogleGenAI({ apiKey: key }),
-      requestTimestamps: [],
+      requestTimestamps: [] as number[],
       dailyCount: 0,
       dailyResetAt: new Date().setHours(24, 0, 0, 0),
       cooldownUntil: 0,
       label: `key-${i + 1}`
     }));
-
-    logger.info(`Gemini key pool initialized with ${this.keys.length} keys`);
   }
 
   // Find the next key that's actually usable right now
   private getAvailableKey(): KeyState | null {
     const now = Date.now();
+    let triedKeys = 0;
 
-    for (let attempts = 0; attempts < this.keys.length; attempts++) {
+    // Try every key, starting from currentIndex, wrapping around
+    while (triedKeys < this.keys.length) {
       const candidate = this.keys[this.currentIndex];
       this.currentIndex = (this.currentIndex + 1) % this.keys.length;
+      triedKeys++;
 
-      // Reset daily counter if day has rolled over
+      // Reset daily counter if past midnight
       if (now > candidate.dailyResetAt) {
+        logger.info(`${candidate.label}: resetting daily counter (was ${candidate.dailyCount})`);
         candidate.dailyCount = 0;
         candidate.dailyResetAt = new Date().setHours(24, 0, 0, 0);
+        candidate.cooldownUntil = 0; // also clear cooldown on day reset
       }
 
       // Clean RPM window
-      candidate.requestTimestamps = candidate.requestTimestamps.filter(t => now - t < 60000);
+      candidate.requestTimestamps = candidate.requestTimestamps.filter(
+        t => now - t < 60000
+      );
 
       const isInCooldown = candidate.cooldownUntil > now;
-      const isOverRpm = candidate.requestTimestamps.length >= 8; // safe margin under the 10 RPM real limit
-      const isOverRpd = candidate.dailyCount >= 18; // safe margin under the 20 RPD real limit
+      const rpmUsed = candidate.requestTimestamps.length;
+      const isOverRpm = rpmUsed >= RPM_LIMIT;
+      const isOverRpd = candidate.dailyCount >= RPD_LIMIT;
+
+      logger.info(`${candidate.label}: cooldown=${isInCooldown}(${Math.max(0, Math.ceil((candidate.cooldownUntil - now)/1000))}s), rpm=${rpmUsed}/${RPM_LIMIT}, rpd=${candidate.dailyCount}/${RPD_LIMIT}`);
 
       if (!isInCooldown && !isOverRpm && !isOverRpd) {
+        logger.info(`→ Selected ${candidate.label}`);
         return candidate;
       }
+
+      logger.warn(`${candidate.label} skipped: cooldown=${isInCooldown}, overRpm=${isOverRpm}, overRpd=${isOverRpd}`);
     }
 
-    return null; // every key is currently exhausted
+    logger.error(`All ${this.keys.length} keys unavailable`);
+    return null;
   }
 
   async call(
@@ -246,87 +264,77 @@ class GeminiKeyPool {
   ): Promise<any> {
     const { maxWaitMs = 90000, temperature, responseMimeType } = options;
     const startTime = Date.now();
-    let hasWaited = false;
+    let attemptCount = 0;
 
-    try {
-      while (Date.now() - startTime < maxWaitMs) {
-        const keyState = this.getAvailableKey();
+    while (Date.now() - startTime < maxWaitMs) {
+      attemptCount++;
+      const keyState = this.getAvailableKey();
 
-        if (!keyState) {
-          if (!hasWaited) {
-            this.waitingCallsCount++;
-            hasWaited = true;
-          }
-          logger.warn(`All ${this.keys.length} Gemini keys are exhausted, waiting 5s before recheck [${context}]`);
-          await new Promise(resolve => setTimeout(resolve, 5000));
-          continue;
-        }
-
-        if (hasWaited) {
-          this.waitingCallsCount--;
-          hasWaited = false;
-        }
-
-        try {
-          keyState.requestTimestamps.push(Date.now());
-          keyState.dailyCount++;
-
-          logger.info(`Gemini call [${context}] using ${keyState.label} (daily: ${keyState.dailyCount}/20, rpm window: ${keyState.requestTimestamps.length}/8)`);
-
-          const configObj: any = { maxOutputTokens: 65536 };
-          if (temperature !== undefined) configObj.temperature = temperature;
-          if (responseMimeType !== undefined) configObj.responseMimeType = responseMimeType;
-
-          const response = await keyState.client.models.generateContent({
-            model: GEMINI_MODEL,
-            contents,
-            config: configObj
-          });
-
-          return response;
-
-        } catch (error: any) {
-          const errorMsg = error.message || '';
-          const isRateLimit =
-            errorMsg.includes('429') ||
-            errorMsg.includes('RESOURCE_EXHAUSTED') ||
-            errorMsg.includes('503') ||
-            errorMsg.includes('UNAVAILABLE') ||
-            errorMsg.includes('experiencing high demand') ||
-            errorMsg.includes('temporary');
-
-          // 404 NOT_FOUND = this key's GCP project doesn't have access to the model.
-          // Other keys may use different projects with different model access — skip and try next.
-          const isModelNotFound =
-            errorMsg.includes('NOT_FOUND') ||
-            errorMsg.includes('404') ||
-            errorMsg.includes('no longer available to new users') ||
-            errorMsg.includes('is not found for API version');
-
-          if (isRateLimit) {
-            logger.warn(`${keyState.label} hit rate limit/overload on [${context}], cooling down and trying next key`);
-            keyState.cooldownUntil = Date.now() + 60000; // 60s cooldown for this specific key
-            continue; // loop will pick a different key automatically
-          }
-
-          if (isModelNotFound) {
-            logger.warn(`${keyState.label} model not available on [${context}], skipping to next key`);
-            keyState.cooldownUntil = Date.now() + 3600000; // 1 hour — model access won't change soon
-            continue; // try next key in pool
-          }
-
-          // Non-rate-limit, non-model-access error — don't burn through all keys for a real bug
-          logger.error(`Gemini call [${context}] failed with non-rate-limit error on ${keyState.label}:`, errorMsg);
-          throw error;
-        }
+      if (!keyState) {
+        this.waitingCallsCount++;
+        logger.warn(`All keys unavailable (attempt ${attemptCount}), waiting 10s... [${context}]`);
+        await new Promise(resolve => setTimeout(resolve, 10000));
+        this.waitingCallsCount = Math.max(0, this.waitingCallsCount - 1);
+        continue;
       }
-    } finally {
-      if (hasWaited) {
-        this.waitingCallsCount--;
+
+      try {
+        keyState.requestTimestamps.push(Date.now());
+        keyState.dailyCount++;
+
+        logger.info(`Gemini call [${context}] using ${keyState.label} (rpm: ${keyState.requestTimestamps.length}/${RPM_LIMIT}, rpd: ${keyState.dailyCount}/${RPD_LIMIT})`);
+
+        const configObj: any = { maxOutputTokens: 65536 };
+        if (temperature !== undefined) configObj.temperature = temperature;
+        if (responseMimeType !== undefined) configObj.responseMimeType = responseMimeType;
+
+        const response = await keyState.client.models.generateContent({
+          model: GEMINI_MODEL,
+          contents,
+          config: configObj
+        });
+
+        return response;
+
+      } catch (error: any) {
+        const errorMsg = error.message || '';
+        const isRateLimit =
+          errorMsg.includes('429') ||
+          errorMsg.includes('RESOURCE_EXHAUSTED') ||
+          errorMsg.includes('503') ||
+          errorMsg.includes('UNAVAILABLE') ||
+          errorMsg.includes('experiencing high demand') ||
+          errorMsg.includes('temporary');
+
+        if (isRateLimit) {
+          logger.warn(`${keyState.label} rate limited [${context}], cooling down 65s`);
+          keyState.cooldownUntil = Date.now() + 65000;
+          keyState.requestTimestamps = []; // clear rpm window
+          continue; // try next key immediately
+        }
+
+        const isModelNotFound =
+          errorMsg.includes('NOT_FOUND') ||
+          errorMsg.includes('404') ||
+          errorMsg.includes('no longer available to new users') ||
+          errorMsg.includes('is not found for API version');
+
+        if (isModelNotFound) {
+          logger.warn(`${keyState.label} model not available on [${context}], cooling down 5m`);
+          keyState.cooldownUntil = Date.now() + 300000;
+          continue; // try next key in pool
+        }
+
+        // Non-rate-limit error — throw immediately
+        logger.error(`Gemini call [${context}] failed with non-rate-limit error on ${keyState.label}:`, errorMsg);
+        throw error;
       }
     }
 
-    throw new Error(`All Gemini API keys are rate limited or exhausted. Please wait a few minutes, or type the answer manually.`);
+    throw new Error(
+      `All ${this.keys.length} Gemini API keys are rate limited or exhausted. ` +
+      `Please wait a few minutes, or type the answer manually.`
+    );
   }
 
   getStatus() {
@@ -334,9 +342,9 @@ class GeminiKeyPool {
     return this.keys.map(k => ({
       label: k.label,
       dailyUsed: k.dailyCount,
-      dailyLimit: 20,
+      dailyLimit: RPD_LIMIT,
       rpmUsed: k.requestTimestamps.filter(t => now - t < 60000).length,
-      rpmLimit: 8,
+      rpmLimit: RPM_LIMIT,
       inCooldown: k.cooldownUntil > now
     }));
   }
@@ -1608,7 +1616,38 @@ async function startServer() {
   });
 
   app.get('/api/ai/pool-status', authMiddleware, (req, res) => {
-    res.json({ keys: geminiPool.getStatus() });
+    const now = Date.now();
+    const status = geminiPool.keys.map((k: any, i: number) => {
+      const recentRequests = k.requestTimestamps?.filter(
+        (t: number) => now - t < 60000
+      ).length || 0;
+
+      return {
+        label: `key-${i + 1}`,
+        hasKey: !!k.key,
+        keyPrefix: k.key ? k.key.substring(0, 8) + '...' : 'MISSING',
+        dailyCount: k.dailyCount || 0,
+        dailyLimit: RPD_LIMIT,
+        rpmUsed: recentRequests,
+        rpmLimit: RPM_LIMIT,
+        inCooldown: k.cooldownUntil > now,
+        cooldownSecondsLeft: k.cooldownUntil > now
+          ? Math.ceil((k.cooldownUntil - now) / 1000)
+          : 0,
+        isAvailable: (!k.cooldownUntil || k.cooldownUntil <= now) &&
+          recentRequests < RPM_LIMIT &&
+          (k.dailyCount || 0) < RPD_LIMIT
+      };
+    });
+
+    const availableCount = status.filter(k => k.isAvailable).length;
+
+    res.json({
+      totalKeys: status.length,
+      availableKeys: availableCount,
+      keys: status,
+      timestamp: new Date().toISOString()
+    });
   });
 
   // J. All API Routes
