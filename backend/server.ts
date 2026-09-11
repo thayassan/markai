@@ -1882,7 +1882,7 @@ async function startServer() {
       }
 
       const token = jwt.sign(
-        { id: user.id, email: user.email, userType: user.userType },
+        { id: user.id, email: user.email, userType: user.userType, studentCode: user.studentCode },
         process.env.JWT_SECRET!,
         { expiresIn: '7d' }
       );
@@ -1941,7 +1941,7 @@ async function startServer() {
       if (!isValid) return res.status(401).json({ error: 'Invalid credentials' });
 
       const token = jwt.sign(
-        { id: user.id, email: user.email, userType: user.userType },
+        { id: user.id, email: user.email, userType: user.userType, studentCode: user.studentCode },
         process.env.JWT_SECRET!,
         { expiresIn: '7d' }
       );
@@ -4761,10 +4761,25 @@ Log in to MarkAI to review results.`.trim()
 
   app.get('/api/student/results', authMiddleware, async (req, res) => {
     try {
-      if (req.user.userType === 'STUDENT') {
-        const results = await (prisma as any).studentResult.findMany({ where: { studentId: req.user.studentCode }, include: { session: true, questions: true }, orderBy: { createdAt: 'desc' } });
+      const userType = (req.user.userType || '').toUpperCase();
+      if (userType === 'STUDENT') {
+        let studentCode = req.user.studentCode;
+        if (!studentCode && req.user.id) {
+          const dbUser = await (prisma as any).user.findUnique({ where: { id: req.user.id }, select: { studentCode: true } });
+          studentCode = dbUser?.studentCode;
+        }
+
+        if (!studentCode) {
+          return res.json([]);
+        }
+
+        const results = await (prisma as any).studentResult.findMany({ 
+          where: { studentId: studentCode }, 
+          include: { session: true, questions: true }, 
+          orderBy: { createdAt: 'desc' } 
+        });
         res.json(results);
-      } else if (req.user.userType === 'LECTURER') {
+      } else if (userType === 'LECTURER') {
         const results = await (prisma as any).studentResult.findMany({ where: { session: { lecturerId: req.user.id } }, include: { session: true, questions: true }, orderBy: { createdAt: 'desc' } });
         res.json(results);
       } else {
@@ -4797,8 +4812,18 @@ Log in to MarkAI to review results.`.trim()
 
         res.json({ totalSessions, papersMarked, pendingReview, avgClassScore });
       } else if (userType === 'STUDENT') {
+        let studentCode = req.user.studentCode;
+        if (!studentCode && req.user.id) {
+          const dbUser = await (prisma as any).user.findUnique({ where: { id: req.user.id }, select: { studentCode: true } });
+          studentCode = dbUser?.studentCode;
+        }
+
+        if (!studentCode) {
+          return res.json({ papersSubmitted: 0, averageScore: 0, bestGrade: 'N/A', streak: 0 });
+        }
+
         const results = await (prisma as any).studentResult.findMany({
-          where: { studentId: req.user.studentCode || '' },
+          where: { studentId: studentCode },
           select: { percentage: true, grade: true, createdAt: true }
         });
 

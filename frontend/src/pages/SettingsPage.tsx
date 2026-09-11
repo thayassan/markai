@@ -25,6 +25,7 @@ const SettingsPage = () => {
     department: user?.department || '',
     role: user?.role || ''
   });
+  const [studentCode, setStudentCode] = useState(user?.studentCode || '');
 
   // Settings States
   const [twoFactorAuth, setTwoFactorAuth] = useState<boolean>(user?.twoFactorAuth ?? false);
@@ -56,6 +57,9 @@ const SettingsPage = () => {
             department: data.department || '',
             role: data.role || ''
           });
+          if (data.studentCode !== undefined) {
+            setStudentCode(data.studentCode || '');
+          }
           setTwoFactorAuth(data.twoFactorAuth);
           setEmailAlerts(data.emailAlerts);
         }
@@ -261,6 +265,22 @@ const SettingsPage = () => {
                         className="w-full px-4 py-3 bg-bg border border-border rounded-button focus:outline-none focus:border-accent transition-colors" 
                       />
                     </div>
+                    {(user?.userType || '').toUpperCase() === 'STUDENT' && (
+                      <div>
+                        <div className="flex items-center justify-between mb-2">
+                          <label className="block text-xs font-bold text-navy uppercase tracking-widest">Student ID</label>
+                          <span className="text-[10px] text-text-muted font-medium bg-navy/5 px-2 py-0.5 rounded">Read-only</span>
+                        </div>
+                        <input 
+                          type="text" 
+                          value={studentCode || user?.studentCode || ''} 
+                          disabled
+                          readOnly
+                          placeholder="Not assigned — contact your lecturer"
+                          className="w-full px-4 py-3 bg-slate-100/80 border border-border rounded-button text-text-mid cursor-not-allowed select-all font-mono text-sm placeholder:text-text-muted/60" 
+                        />
+                      </div>
+                    )}
                     <div>
                       <label className="block text-xs font-bold text-navy uppercase tracking-widest mb-2">Email Address</label>
                       <input 
