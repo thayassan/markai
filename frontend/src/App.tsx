@@ -23,6 +23,7 @@ import PrivacyPage from './pages/PrivacyPage';
 import TermsPage from './pages/TermsPage';
 import CareersPage from './pages/CareersPage';
 import DocsPage from './pages/DocsPage';
+import ModerationPage from './pages/ModerationPage';
 import { NotFoundPage } from './pages/ErrorPages';
 import { ErrorBoundary } from './components/ErrorBoundary';
 import { AuthProvider, useAuth } from './context/AuthContext';
@@ -59,7 +60,8 @@ const AppRoutes = () => {
   const userEmail = user?.email;
   const publicPaths = ['/', '/login', '/register', '/features', '/pricing', '/about', '/privacy', '/terms', '/careers', '/docs'];
   React.useEffect(() => {
-    if (!isLoading && !userEmail && !publicPaths.includes(window.location.pathname)) {
+    const isPublic = publicPaths.includes(window.location.pathname) || window.location.pathname.startsWith('/moderate');
+    if (!isLoading && !userEmail && !isPublic) {
       navigateRef.current('/login', { replace: true });
     }
   }, [isLoading, userEmail]);
@@ -95,6 +97,7 @@ const AppRoutes = () => {
         <Route path="/terms" element={<PageTransition><TermsPage /></PageTransition>} />
         <Route path="/careers" element={<PageTransition><CareersPage /></PageTransition>} />
         <Route path="/docs" element={<PageTransition><DocsPage /></PageTransition>} />
+        <Route path="/moderate/:token" element={<PageTransition><ModerationPage /></PageTransition>} />
         
         {/* Student Routes */}
         <Route path="/dashboard" element={

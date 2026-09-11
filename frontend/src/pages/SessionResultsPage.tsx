@@ -4,10 +4,10 @@ import {
   ArrowLeft, Download, CheckCircle2, Mail, Users, 
   TrendingUp, Award, Search, Sparkles, Filter, 
   ChevronRight, AlertCircle, Loader2, Play, RotateCw,
-  FileText, Clock
+  FileText, Clock, ShieldCheck, Copy, Check
 } from 'lucide-react';
 import { Link, useParams } from 'react-router-dom';
-import { motion, AnimatePresence } from 'motion/react';
+import { motion, AnimatePresence } from 'framer-motion';
 import { useQuery, useMutation, useQueryClient } from '@tanstack/react-query';
 import { 
   BarChart, Bar, XAxis, YAxis, CartesianGrid, 
@@ -214,6 +214,37 @@ const SessionResultsPage = () => {
     }
   });
 
+  // Moderation state & mutation
+  const [showModerationModal, setShowModerationModal] = useState(false);
+  const [moderatorEmail, setModeratorEmail] = useState('');
+  const [moderatorNote, setModeratorNote] = useState('');
+  const [copiedModerationLink, setCopiedModerationLink] = useState(false);
+
+  const sendModerationMutation = useMutation({
+    mutationFn: async () => {
+      const res = await apiFetch(`/api/sessions/${id}/send-moderation`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ moderatorEmail, note: moderatorNote })
+      });
+      if (!res.ok) {
+        const err = await res.json();
+        throw new Error(err.error || 'Failed to send moderation invitation');
+      }
+      return res.json();
+    },
+    onSuccess: () => {
+      queryClient.invalidateQueries({ queryKey: ['session', id] });
+      alert(`Moderation request sent successfully to ${moderatorEmail}!`);
+      setShowModerationModal(false);
+      setModeratorEmail('');
+      setModeratorNote('');
+    },
+    onError: (error: any) => {
+      alert(`Error sending invitation: ${error.message}`);
+    }
+  });
+
   const handleDownloadReports = () => {
     const token = safeGetItem('markai_token');
     // Using simple window.open or a link for download
@@ -354,6 +385,13 @@ const SessionResultsPage = () => {
                    {approveAllMutation.isPending ? <Loader2 size={14} className="animate-spin" /> : <CheckCircle2 size={14} />}
                    {session?.status === 'COMPLETE' ? 'All Approved' : 'Approve All Results'}
                  </button>
+                 <button 
+                   onClick={() => setShowModerationModal(true)}
+                   className="btn-ghost flex items-center gap-2 text-xs border border-border"
+                 >
+                   <ShieldCheck size={14} className="text-navy" />
+                   {session?.moderationStatus ? 'Moderation Status' : 'Send for Moderation'}
+                 </button>
                </>
              )}
              {isPending && hasAnswerSheets && (
@@ -379,6 +417,67 @@ const SessionResultsPage = () => {
           </div>
         </div>
       </div>
+
+      {/* Moderation Status Banner */}
+      {session?.moderationStatus && (
+        <div className="mb-8 p-5 bg-surface rounded-md border border-border flex flex-col md:flex-row md:items-center justify-between gap-4 shadow-sm">
+          <div className="flex items-center gap-3.5">
+            <div className={cn(
+              "w-10 h-10 rounded-full flex items-center justify-center shrink-0",
+              session.moderationStatus === 'APPROVED' ? "bg-emerald-100 text-emerald-700" :
+              session.moderationStatus === 'RETURNED' ? "bg-amber-100 text-amber-700" :
+              "bg-blue-100 text-blue-700"
+            )}>
+              <ShieldCheck size={20} />
+            </div>
+            <div>
+              <div className="flex items-center gap-2">
+                <h3 className="font-bold text-navy text-sm">External Moderation / Second Marking</h3>
+                <span className={cn(
+                  "badge text-[10px] px-2 py-0.5 font-bold",
+                  session.moderationStatus === 'APPROVED' ? "bg-emerald-100 text-emerald-800" :
+                  session.moderationStatus === 'RETURNED' ? "bg-amber-100 text-amber-800" :
+                  "bg-blue-100 text-blue-800"
+                )}>
+                  {session.moderationStatus}
+                </span>
+              </div>
+              <p className="text-xs text-text-muted mt-0.5">
+                Moderator: <strong>{session.moderatorEmail || 'Invited Moderator'}</strong>
+                {session.moderatorNote && ` • Note: "${session.moderatorNote}"`}
+              </p>
+              {session.moderationFeedback && (
+                <p className="text-xs text-amber-900 bg-amber-50 p-2.5 rounded mt-2 border border-amber-200">
+                  <strong>Moderator Feedback:</strong> {session.moderationFeedback}
+                </p>
+              )}
+            </div>
+          </div>
+
+          <div className="flex items-center gap-2">
+            {session.moderatorToken && (
+              <button
+                onClick={() => {
+                  const url = `${window.location.origin}/moderate/${session.moderatorToken}`;
+                  navigator.clipboard.writeText(url);
+                  setCopiedModerationLink(true);
+                  setTimeout(() => setCopiedModerationLink(false), 2500);
+                }}
+                className="btn-ghost border border-border text-xs flex items-center gap-1.5"
+              >
+                {copiedModerationLink ? <Check size={13} className="text-emerald-600" /> : <Copy size={13} />}
+                {copiedModerationLink ? 'Copied Link!' : 'Copy Moderator Link'}
+              </button>
+            )}
+            <button
+              onClick={() => setShowModerationModal(true)}
+              className="btn-ghost border border-border text-xs"
+            >
+              {session.moderationStatus === 'APPROVED' ? 'View Details' : 'Resend / Update'}
+            </button>
+          </div>
+        </div>
+      )}
 
       {/* Marking Progress Banner */}
       {isCurrentlyMarking && (
@@ -726,6 +825,98 @@ const SessionResultsPage = () => {
            </div>
         </div>
       </div>
+
+      {/* Moderation Modal */}
+      <AnimatePresence>
+        {showModerationModal && (
+          <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/50 backdrop-blur-sm p-4">
+            <motion.div
+              initial={{ scale: 0.95, opacity: 0 }}
+              animate={{ scale: 1, opacity: 1 }}
+              exit={{ scale: 0.95, opacity: 0 }}
+              className="card max-w-md w-full p-6 border border-border bg-surface"
+            >
+              <div className="w-10 h-10 rounded-full bg-navy/10 text-navy flex items-center justify-center mb-4">
+                <ShieldCheck size={22} />
+              </div>
+              <h3 className="text-lg font-serif font-bold text-navy mb-1">
+                Invite Second Marker / Moderator
+              </h3>
+              <p className="text-xs text-text-muted mb-4 leading-relaxed">
+                An email with a secure, 7-day token link will be sent to the moderator. They will be able to review AI marks, view student submissions, and enter mark overrides.
+              </p>
+
+              <div className="space-y-3 mb-6">
+                <div>
+                  <label className="block text-xs font-bold text-navy mb-1 uppercase tracking-wider">
+                    Moderator's Email Address
+                  </label>
+                  <input 
+                    type="email"
+                    placeholder="e.g. external.examiner@university.edu"
+                    value={moderatorEmail}
+                    onChange={(e) => setModeratorEmail(e.target.value)}
+                    className="input-field text-xs w-full"
+                  />
+                </div>
+
+                <div>
+                  <label className="block text-xs font-bold text-navy mb-1 uppercase tracking-wider">
+                    Note or Instructions (Optional)
+                  </label>
+                  <textarea 
+                    rows={3}
+                    placeholder="e.g. Please pay special attention to question 3(b) rubric strictness..."
+                    value={moderatorNote}
+                    onChange={(e) => setModeratorNote(e.target.value)}
+                    className="input-field text-xs w-full p-2.5"
+                  />
+                </div>
+
+                {session?.moderatorToken && (
+                  <div className="p-3 bg-bg rounded border border-border text-xs">
+                    <span className="font-bold text-navy block mb-1">Direct Link:</span>
+                    <div className="flex items-center justify-between gap-2">
+                      <span className="truncate text-text-muted font-mono text-[11px]">
+                        {`${window.location.origin}/moderate/${session.moderatorToken}`}
+                      </span>
+                      <button
+                        type="button"
+                        onClick={() => {
+                          const url = `${window.location.origin}/moderate/${session.moderatorToken}`;
+                          navigator.clipboard.writeText(url);
+                          setCopiedModerationLink(true);
+                          setTimeout(() => setCopiedModerationLink(false), 2500);
+                        }}
+                        className="text-navy font-bold hover:underline shrink-0"
+                      >
+                        {copiedModerationLink ? 'Copied' : 'Copy'}
+                      </button>
+                    </div>
+                  </div>
+                )}
+              </div>
+
+              <div className="flex justify-end gap-3">
+                <button 
+                  onClick={() => setShowModerationModal(false)}
+                  className="btn-ghost text-xs border border-border"
+                >
+                  Cancel
+                </button>
+                <button 
+                  onClick={() => sendModerationMutation.mutate()}
+                  disabled={sendModerationMutation.isPending || !moderatorEmail.includes('@')}
+                  className="btn-primary text-xs flex items-center gap-1.5"
+                >
+                  {sendModerationMutation.isPending ? <Loader2 size={13} className="animate-spin" /> : <Mail size={13} />}
+                  {sendModerationMutation.isPending ? 'Sending...' : 'Send Invitation'}
+                </button>
+              </div>
+            </motion.div>
+          </div>
+        )}
+      </AnimatePresence>
     </DashboardLayout>
   );
 };

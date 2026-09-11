@@ -3624,6 +3624,344 @@ Log in to MarkAI to review results.`.trim()
     }
   });
 
+  // ============================================
+  // SECOND MARKING / EXTERNAL MODERATION
+  // ============================================
+
+  app.post('/api/sessions/:id/send-moderation', authMiddleware, async (req, res) => {
+    try {
+      const { id } = req.params;
+      const { moderatorEmail, note } = req.body;
+
+      if (!moderatorEmail || !moderatorEmail.includes('@')) {
+        return res.status(400).json({ error: 'Valid moderator email is required' });
+      }
+
+      const session = await (prisma as any).markingSession.findUnique({
+        where: { id },
+        include: {
+          lecturer: { select: { fullName: true, email: true } },
+          results: { select: { id: true } }
+        }
+      });
+
+      if (!session) {
+        return res.status(404).json({ error: 'Session not found' });
+      }
+
+      // Generate a secure 7-day token
+      const token = crypto.randomBytes(32).toString('hex');
+      const tokenExp = new Date(Date.now() + 7 * 24 * 60 * 60 * 1000);
+
+      await (prisma as any).markingSession.update({
+        where: { id },
+        data: {
+          moderationStatus: 'PENDING',
+          moderatorEmail,
+          moderatorToken: token,
+          moderatorTokenExp: tokenExp,
+          moderatorNote: note || null,
+          submittedAt: new Date()
+        }
+      });
+
+      const frontendBase = process.env.FRONTEND_URL || (process.env.NODE_ENV === 'production' ? 'https://markaido.netlify.app' : 'http://localhost:5173');
+      const moderationUrl = `${frontendBase}/moderate/${token}`;
+
+      // Send invitation email via Resend
+      try {
+        await resend.emails.send({
+          from: 'MarkAI <noreply@markai.edu>',
+          to: moderatorEmail,
+          subject: `Moderation Request: ${session.name} (${session.subject})`,
+          html: `
+            <div style="font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, sans-serif; max-width: 600px; margin: 0 auto; color: #1e293b;">
+              <h2 style="color: #0f172a; border-bottom: 2px solid #e2e8f0; padding-bottom: 12px;">Second Marking / Moderation Request</h2>
+              <p>Hello,</p>
+              <p>You have been invited by <strong>${session.lecturer?.fullName || 'a colleague'}</strong> to act as the second marker / external moderator for the following assessment session:</p>
+              
+              <div style="background-color: #f8fafc; border: 1px solid #e2e8f0; border-radius: 8px; padding: 16px; margin: 20px 0;">
+                <p style="margin: 4px 0;"><strong>Session:</strong> ${session.name}</p>
+                <p style="margin: 4px 0;"><strong>Subject / Course:</strong> ${session.subject} (${session.courseId})</p>
+                <p style="margin: 4px 0;"><strong>Exam Board:</strong> ${session.examBoard}</p>
+                <p style="margin: 4px 0;"><strong>Student Papers:</strong> ${session.results?.length || 0}</p>
+                ${note ? `<p style="margin: 12px 0 4px; padding-top: 8px; border-top: 1px dashed #cbd5e1;"><strong>Note from marker:</strong> ${note}</p>` : ''}
+              </div>
+
+              <p>You can review all student papers, examine AI feedback and marker awards, and enter overrides where needed.</p>
+
+              <div style="margin: 30px 0;">
+                <a href="${moderationUrl}" style="background-color: #1a2e5a; color: white; padding: 12px 28px; border-radius: 6px; text-decoration: none; font-weight: bold; display: inline-block;">
+                  Review & Moderate Papers
+                </a>
+              </div>
+
+              <p style="color: #64748b; font-size: 13px;">This secure link is unique to you and will expire in 7 days.<br/>
+              Direct link: <a href="${moderationUrl}" style="color: #2563eb;">${moderationUrl}</a></p>
+            </div>
+          `
+        });
+      } catch (emailErr: any) {
+        logger.warn('Failed to send moderation email via Resend (continuing with direct link):', emailErr?.message);
+      }
+
+      res.json({
+        success: true,
+        moderationStatus: 'PENDING',
+        moderatorEmail,
+        moderationUrl,
+        token
+      });
+    } catch (error: any) {
+      logger.error('Failed to send moderation invitation:', error);
+      res.status(500).json({ error: error.message });
+    }
+  });
+
+  app.get('/api/moderation/:token', async (req, res) => {
+    try {
+      const { token } = req.params;
+
+      const session = await (prisma as any).markingSession.findFirst({
+        where: { moderatorToken: token },
+        include: {
+          lecturer: {
+            select: { id: true, fullName: true, email: true, department: true }
+          },
+          results: {
+            include: {
+              questions: {
+                include: {
+                  moderationOverrides: true
+                },
+                orderBy: { questionNumber: 'asc' }
+              }
+            },
+            orderBy: { studentName: 'asc' }
+          },
+          moderationOverrides: true
+        }
+      });
+
+      if (!session) {
+        return res.status(404).json({ error: 'Moderation session not found or invalid link.' });
+      }
+
+      if (session.moderatorTokenExp && new Date() > new Date(session.moderatorTokenExp)) {
+        return res.status(410).json({ error: 'This moderation link has expired (7-day validity exceeded).' });
+      }
+
+      // If currently PENDING, transition to UNDER_REVIEW
+      if (session.moderationStatus === 'PENDING') {
+        await (prisma as any).markingSession.update({
+          where: { id: session.id },
+          data: { moderationStatus: 'UNDER_REVIEW' }
+        });
+        session.moderationStatus = 'UNDER_REVIEW';
+      }
+
+      res.json({
+        session: {
+          id: session.id,
+          name: session.name,
+          subject: session.subject,
+          courseId: session.courseId,
+          examBoard: session.examBoard,
+          paperType: session.paperType,
+          totalMaxMarks: session.totalMaxMarks,
+          moderationStatus: session.moderationStatus,
+          moderatorEmail: session.moderatorEmail,
+          moderatorNote: session.moderatorNote,
+          moderationFeedback: session.moderationFeedback,
+          submittedAt: session.submittedAt,
+          moderatedAt: session.moderatedAt,
+          lecturer: session.lecturer
+        },
+        results: session.results,
+        overrides: session.moderationOverrides
+      });
+    } catch (error: any) {
+      logger.error('Failed to get moderation session:', error);
+      res.status(500).json({ error: error.message });
+    }
+  });
+
+  app.post('/api/moderation/:token/override', async (req, res) => {
+    try {
+      const { token } = req.params;
+      const { questionResultId, moderatorMark, moderatorNote } = req.body;
+
+      if (!questionResultId || moderatorMark === undefined || isNaN(Number(moderatorMark))) {
+        return res.status(400).json({ error: 'Invalid question result or mark' });
+      }
+
+      const session = await (prisma as any).markingSession.findFirst({
+        where: { moderatorToken: token }
+      });
+
+      if (!session) {
+        return res.status(404).json({ error: 'Invalid moderation session' });
+      }
+
+      if (session.moderationStatus === 'APPROVED') {
+        return res.status(400).json({ error: 'This session has already been approved and finalised.' });
+      }
+
+      const qResult = await (prisma as any).questionResult.findUnique({
+        where: { id: questionResultId },
+        include: { studentResult: true }
+      });
+
+      if (!qResult || qResult.studentResult?.sessionId !== session.id) {
+        return res.status(404).json({ error: 'Question result not found in this session' });
+      }
+
+      const parsedMark = Math.max(0, Math.min(qResult.marksAvailable, Number(moderatorMark)));
+      const originalMark = qResult.lecturerOverride ?? qResult.marksAwarded;
+
+      // Upsert ModerationOverride
+      const existingOverride = await (prisma as any).moderationOverride.findFirst({
+        where: { sessionId: session.id, questionResultId }
+      });
+
+      let override;
+      if (existingOverride) {
+        override = await (prisma as any).moderationOverride.update({
+          where: { id: existingOverride.id },
+          data: {
+            moderatorMark: parsedMark,
+            moderatorNote: moderatorNote || null
+          }
+        });
+      } else {
+        override = await (prisma as any).moderationOverride.create({
+          data: {
+            sessionId: session.id,
+            questionResultId,
+            originalMark,
+            moderatorMark: parsedMark,
+            moderatorNote: moderatorNote || null
+          }
+        });
+      }
+
+      // Update question result lecturerOverride / moderator value
+      await (prisma as any).questionResult.update({
+        where: { id: questionResultId },
+        data: {
+          lecturerOverride: parsedMark,
+          lecturerNote: moderatorNote ? `Moderator: ${moderatorNote}` : qResult.lecturerNote
+        }
+      });
+
+      // Recalculate StudentResult totalMarks and percentage
+      const allStudentQuestions = await (prisma as any).questionResult.findMany({
+        where: { studentResultId: qResult.studentResultId }
+      });
+
+      const newTotalMarks = allStudentQuestions.reduce((sum: number, q: any) => {
+        const mark = q.id === questionResultId ? parsedMark : (q.lecturerOverride ?? q.marksAwarded);
+        return sum + mark;
+      }, 0);
+
+      const maxMarks = qResult.studentResult.maxMarks || 100;
+      const newPercentage = Math.round((newTotalMarks / maxMarks) * 1000) / 10;
+
+      await (prisma as any).studentResult.update({
+        where: { id: qResult.studentResultId },
+        data: {
+          totalMarks: newTotalMarks,
+          percentage: newPercentage
+        }
+      });
+
+      res.json({
+        success: true,
+        override,
+        studentResultId: qResult.studentResultId,
+        newTotalMarks,
+        newPercentage
+      });
+    } catch (error: any) {
+      logger.error('Failed to save moderation override:', error);
+      res.status(500).json({ error: error.message });
+    }
+  });
+
+  app.post('/api/moderation/:token/decision', async (req, res) => {
+    try {
+      const { token } = req.params;
+      const { decision, feedback } = req.body; // 'APPROVE' or 'RETURN'
+
+      if (!['APPROVE', 'RETURN'].includes(decision)) {
+        return res.status(400).json({ error: "Decision must be 'APPROVE' or 'RETURN'" });
+      }
+
+      const session = await (prisma as any).markingSession.findFirst({
+        where: { moderatorToken: token },
+        include: {
+          lecturer: { select: { fullName: true, email: true } },
+          moderationOverrides: true
+        }
+      });
+
+      if (!session) {
+        return res.status(404).json({ error: 'Invalid moderation session' });
+      }
+
+      const newStatus = decision === 'APPROVE' ? 'APPROVED' : 'RETURNED';
+
+      await (prisma as any).markingSession.update({
+        where: { id: session.id },
+        data: {
+          moderationStatus: newStatus,
+          moderatedAt: new Date(),
+          moderationFeedback: feedback || null
+        }
+      });
+
+      // Notify original marker by email
+      if (session.lecturer?.email) {
+        try {
+          await resend.emails.send({
+            from: 'MarkAI <noreply@markai.edu>',
+            to: session.lecturer.email,
+            subject: `Moderation ${decision === 'APPROVE' ? 'Approved' : 'Returned'}: ${session.name}`,
+            html: `
+              <div style="font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, sans-serif; max-width: 600px; margin: 0 auto; color: #1e293b;">
+                <h2 style="color: #0f172a;">Assessment Moderation Update</h2>
+                <p>Hello <strong>${session.lecturer.fullName}</strong>,</p>
+                <p>The external moderator (<strong>${session.moderatorEmail || 'Moderator'}</strong>) has submitted their decision for <strong>${session.name}</strong>:</p>
+
+                <div style="background-color: ${decision === 'APPROVE' ? '#f0fdf4' : '#fef2f2'}; border: 1px solid ${decision === 'APPROVE' ? '#bbf7d0' : '#fecaca'}; border-radius: 8px; padding: 16px; margin: 20px 0;">
+                  <h3 style="margin: 0 0 8px 0; color: ${decision === 'APPROVE' ? '#166534' : '#991b1b'};">
+                    ${decision === 'APPROVE' ? '✓ Marks Approved & Finalised' : '⚠ Session Returned with Feedback'}
+                  </h3>
+                  <p style="margin: 4px 0;"><strong>Overrides Applied:</strong> ${session.moderationOverrides?.length || 0} question mark(s) modified</p>
+                  ${feedback ? `<p style="margin: 12px 0 4px; padding-top: 8px; border-top: 1px dashed #cbd5e1;"><strong>Moderator Comments:</strong> ${feedback}</p>` : ''}
+                </div>
+
+                <p>You can view the full moderation log and final student records directly in your MarkAI dashboard.</p>
+              </div>
+            `
+          });
+        } catch (emailErr: any) {
+          logger.warn('Failed to send moderation decision notification email:', emailErr?.message);
+        }
+      }
+
+      res.json({
+        success: true,
+        moderationStatus: newStatus,
+        moderatedAt: new Date(),
+        feedback
+      });
+    } catch (error: any) {
+      logger.error('Failed to submit moderation decision:', error);
+      res.status(500).json({ error: error.message });
+    }
+  });
+
   app.post('/api/sessions/:id/students/:studentId/re-evaluate', authMiddleware, async (req, res) => {
     try {
       const { id, studentId } = req.params;

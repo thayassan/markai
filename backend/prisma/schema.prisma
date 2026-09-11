@@ -99,12 +99,21 @@ model MarkingSession {
   feedbackDetail      String               @default("Detailed")
   status              String               @default("PENDING")
   errorMessage        String?
+  moderationStatus    String?              // PENDING | UNDER_REVIEW | APPROVED | RETURNED
+  moderatorEmail      String?
+  moderatorToken      String?              @unique
+  moderatorTokenExp   DateTime?
+  moderatorNote       String?
+  moderationFeedback  String?
+  submittedAt         DateTime?
+  moderatedAt         DateTime?
   createdAt           DateTime             @default(now())
 
-  class        Class?               @relation(fields: [classId], references: [id])
-  lecturer     User                 @relation(fields: [lecturerId], references: [id], onDelete: Cascade)
-  results      StudentResult[]
-  answerSheets StudentAnswerSheet[]
+  class               Class?               @relation(fields: [classId], references: [id])
+  lecturer            User                 @relation(fields: [lecturerId], references: [id], onDelete: Cascade)
+  results             StudentResult[]
+  answerSheets        StudentAnswerSheet[]
+  moderationOverrides ModerationOverride[]
 
   @@index([lecturerId])
   @@index([classId])
@@ -169,7 +178,8 @@ model QuestionResult {
   lecturerNote          String?       // ADDED — was missing, override endpoint needs this
   aiConfidence          String?
   consensusNote         String?
-  studentResult         StudentResult @relation(fields: [studentResultId], references: [id])
+  studentResult         StudentResult        @relation(fields: [studentResultId], references: [id])
+  moderationOverrides   ModerationOverride[]
 
   @@index([studentResultId])
 }
@@ -207,4 +217,20 @@ model OcrCache {
   fileHash      String   @unique
   extractedText String
   createdAt     DateTime @default(now())
+}
+
+model ModerationOverride {
+  id               String         @id @default(cuid())
+  sessionId        String
+  questionResultId String
+  originalMark     Int
+  moderatorMark    Int
+  moderatorNote    String?
+  createdAt        DateTime       @default(now())
+
+  session          MarkingSession @relation(fields: [sessionId], references: [id], onDelete: Cascade)
+  questionResult   QuestionResult @relation(fields: [questionResultId], references: [id], onDelete: Cascade)
+
+  @@index([sessionId])
+  @@index([questionResultId])
 }
