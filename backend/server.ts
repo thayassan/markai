@@ -3858,6 +3858,64 @@ Log in to MarkAI to review results.`.trim()
     }
   });
 
+  async function recordMarkChange(params: {
+    questionResultId: string;
+    sessionId: string;
+    studentId: string;
+    questionNumber: string;
+    changedByUserId: string;
+    changedByName: string;
+    changedByRole: string;
+    previousMark: number;
+    newMark: number;
+    marksAvailable: number;
+    reason?: string;
+    changeType: 'LECTURER_OVERRIDE' | 'MODERATION_ADJUST';
+  }) {
+    // Only record if mark actually changed
+    if (params.previousMark === params.newMark) return;
+
+    await (prisma as any).markChangeAudit.create({
+      data: {
+        questionResultId: params.questionResultId,
+        sessionId: params.sessionId,
+        studentId: params.studentId,
+        questionNumber: params.questionNumber,
+        changedBy: params.changedByUserId,
+        changedByName: params.changedByName,
+        changedByRole: params.changedByRole,
+        previousMark: params.previousMark,
+        newMark: params.newMark,
+        marksAvailable: params.marksAvailable,
+        reason: params.reason || null,
+        changeType: params.changeType
+      }
+    });
+
+    const currentQ = await (prisma as any).questionResult.findUnique({
+      where: { id: params.questionResultId },
+      select: { originalAiMark: true, marksAwarded: true }
+    });
+
+    const originalAiMark = currentQ?.originalAiMark !== null && currentQ?.originalAiMark !== undefined
+      ? currentQ.originalAiMark
+      : (currentQ?.marksAwarded ?? params.previousMark);
+
+    // Update the QuestionResult with who last changed it
+    await (prisma as any).questionResult.update({
+      where: { id: params.questionResultId },
+      data: {
+        lastChangedBy: params.changedByUserId,
+        lastChangedByName: params.changedByName,
+        lastChangedByRole: params.changedByRole,
+        lastChangedAt: new Date(),
+        originalAiMark
+      }
+    });
+
+    logger.info(`Mark changed: ${params.questionNumber} | ${params.changedByName} (${params.changedByRole}) | ${params.previousMark} → ${params.newMark}`);
+  }
+
   app.post('/api/moderation/:token/override', async (req, res) => {
     try {
       const { token } = req.params;
@@ -3926,6 +3984,22 @@ Log in to MarkAI to review results.`.trim()
         }
       });
 
+      // Record mark change audit
+      await recordMarkChange({
+        questionResultId,
+        sessionId: session.id,
+        studentId: qResult.studentResult.studentId,
+        questionNumber: qResult.questionNumber,
+        changedByUserId: session.moderatorEmail || 'moderator',
+        changedByName: session.moderatorEmail ? `Moderator (${session.moderatorEmail})` : 'Moderator',
+        changedByRole: 'MODERATOR',
+        previousMark: originalMark,
+        newMark: parsedMark,
+        marksAvailable: qResult.marksAvailable,
+        reason: moderatorNote || undefined,
+        changeType: 'MODERATION_ADJUST'
+      });
+
       // Recalculate StudentResult totalMarks and percentage
       const allStudentQuestions = await (prisma as any).questionResult.findMany({
         where: { studentResultId: qResult.studentResultId }
@@ -3990,9 +4064,11 @@ Log in to MarkAI to review results.`.trim()
         for (const [qId, modMark] of Object.entries(overrides)) {
           if (typeof modMark === 'number') {
             const qResult = await (prisma as any).questionResult.findUnique({
-              where: { id: qId }
+              where: { id: qId },
+              include: { studentResult: true }
             });
             if (qResult) {
+              const previousMark = qResult.lecturerOverride ?? qResult.marksAwarded;
               const existingOv = await (prisma as any).moderationOverride.findFirst({
                 where: { sessionId: session.id, questionResultId: qId }
               });
@@ -4006,7 +4082,7 @@ Log in to MarkAI to review results.`.trim()
                   data: {
                     sessionId: session.id,
                     questionResultId: qId,
-                    originalMark: qResult.lecturerOverride ?? qResult.marksAwarded,
+                    originalMark: previousMark,
                     moderatorMark: modMark,
                     moderatorNote: note || null
                   }
@@ -4017,6 +4093,23 @@ Log in to MarkAI to review results.`.trim()
                 where: { id: qId },
                 data: { lecturerOverride: modMark }
               });
+
+              if (previousMark !== modMark) {
+                await recordMarkChange({
+                  questionResultId: qId,
+                  sessionId: session.id,
+                  studentId: qResult.studentResult.studentId,
+                  questionNumber: qResult.questionNumber,
+                  changedByUserId: session.moderatorEmail || 'moderator',
+                  changedByName: session.moderatorEmail ? `Moderator (${session.moderatorEmail})` : 'Moderator',
+                  changedByRole: 'MODERATOR',
+                  previousMark,
+                  newMark: modMark,
+                  marksAvailable: qResult.marksAvailable,
+                  reason: note || feedback || undefined,
+                  changeType: 'MODERATION_ADJUST'
+                });
+              }
 
               // Recalculate student total
               const studentQuestions = await (prisma as any).questionResult.findMany({
@@ -4387,7 +4480,41 @@ Log in to MarkAI to review results.`.trim()
   app.patch('/api/results/:resultId/override', authMiddleware, async (req, res) => {
     try {
       const { questionId, lecturerMark, lecturerNote } = overrideSchema.parse(req.body);
-      await (prisma as any).questionResult.update({ where: { id: questionId }, data: { lecturerOverride: lecturerMark, lecturerNote } });
+      const userId = (req as any).userId;
+
+      const user = await (prisma as any).user.findUnique({
+        where: { id: userId },
+        select: { fullName: true, userType: true }
+      });
+
+      const question = await (prisma as any).questionResult.findUnique({
+        where: { id: questionId },
+        include: { studentResult: { include: { session: true } } }
+      });
+
+      if (!question) return res.status(404).json({ error: 'Question not found' });
+
+      const previousMark = question.lecturerOverride ?? question.marksAwarded;
+
+      await (prisma as any).questionResult.update({
+        where: { id: questionId },
+        data: { lecturerOverride: lecturerMark, lecturerNote: lecturerNote || null }
+      });
+
+      await recordMarkChange({
+        questionResultId: questionId,
+        sessionId: question.studentResult.sessionId,
+        studentId: question.studentResult.studentId,
+        questionNumber: question.questionNumber,
+        changedByUserId: userId,
+        changedByName: user?.fullName || 'Lecturer',
+        changedByRole: 'LECTURER',
+        previousMark,
+        newMark: lecturerMark,
+        marksAvailable: question.marksAvailable,
+        reason: lecturerNote,
+        changeType: 'LECTURER_OVERRIDE'
+      });
 
       const studentResult = await (prisma as any).studentResult.findUnique({ where: { id: req.params.resultId }, include: { questions: true } });
       const totalMarks = studentResult!.questions.reduce((acc: number, q: any) => acc + (q.lecturerOverride ?? q.marksAwarded), 0);
@@ -4403,7 +4530,90 @@ Log in to MarkAI to review results.`.trim()
       const updated = await (prisma as any).studentResult.update({ where: { id: req.params.resultId }, data: { totalMarks, percentage, grade }, include: { questions: true } });
       res.json(updated);
     } catch (error: any) {
+      logger.error('Override error:', error);
       res.status(400).json({ error: error.message });
+    }
+  });
+
+  app.patch('/api/results/:resultId/questions/:questionId/override', authMiddleware, async (req, res) => {
+    try {
+      const { resultId, questionId } = req.params;
+      const { newMark, note } = req.body;
+      const userId = (req as any).userId;
+
+      const user = await (prisma as any).user.findUnique({
+        where: { id: userId },
+        select: { fullName: true, userType: true }
+      });
+
+      const question = await (prisma as any).questionResult.findUnique({
+        where: { id: questionId },
+        include: { studentResult: { include: { session: true } } }
+      });
+
+      if (!question) return res.status(404).json({ error: 'Question not found' });
+
+      const previousMark = question.lecturerOverride ?? question.marksAwarded;
+
+      const updatedQ = await (prisma as any).questionResult.update({
+        where: { id: questionId },
+        data: {
+          lecturerOverride: Number(newMark),
+          lecturerNote: note || null
+        }
+      });
+
+      await recordMarkChange({
+        questionResultId: questionId,
+        sessionId: question.studentResult.sessionId,
+        studentId: question.studentResult.studentId,
+        questionNumber: question.questionNumber,
+        changedByUserId: userId,
+        changedByName: user?.fullName || 'Lecturer',
+        changedByRole: 'LECTURER',
+        previousMark,
+        newMark: Number(newMark),
+        marksAvailable: question.marksAvailable,
+        reason: note,
+        changeType: 'LECTURER_OVERRIDE'
+      });
+
+      const studentResult = await (prisma as any).studentResult.findUnique({ where: { id: resultId }, include: { questions: true } });
+      if (studentResult) {
+        const totalMarks = studentResult.questions.reduce((acc: number, q: any) => acc + (q.lecturerOverride ?? q.marksAwarded), 0);
+        const percentage = (totalMarks / studentResult.maxMarks) * 100;
+        let grade = 'F';
+        if (percentage >= 90) grade = 'A*';
+        else if (percentage >= 80) grade = 'A';
+        else if (percentage >= 70) grade = 'B';
+        else if (percentage >= 60) grade = 'C';
+        else if (percentage >= 50) grade = 'D';
+        else if (percentage >= 40) grade = 'E';
+
+        await (prisma as any).studentResult.update({ where: { id: resultId }, data: { totalMarks, percentage, grade } });
+      }
+
+      res.json(updatedQ);
+    } catch (error: any) {
+      logger.error('Override error:', error);
+      res.status(500).json({ error: error.message });
+    }
+  });
+
+  app.get('/api/results/:resultId/audit', authMiddleware, async (req, res) => {
+    try {
+      const { resultId } = req.params;
+
+      const auditTrail = await (prisma as any).markChangeAudit.findMany({
+        where: {
+          questionResult: { studentResultId: resultId }
+        },
+        orderBy: { createdAt: 'desc' }
+      });
+
+      res.json(auditTrail);
+    } catch (error: any) {
+      res.status(500).json({ error: error.message });
     }
   });
 

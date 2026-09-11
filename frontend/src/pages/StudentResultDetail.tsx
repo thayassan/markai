@@ -1,9 +1,10 @@
-import React from 'react';
+import React, { useState } from 'react';
 import { DashboardLayout } from '@/src/components/DashboardLayout';
 import { 
   ArrowLeft, Download, CheckCircle2, TrendingUp, 
   Award, Sparkles, BookOpen, AlertCircle, Loader2, 
-  ChevronRight, MessageSquare, Users
+  ChevronRight, MessageSquare, Users, ShieldCheck,
+  UserCheck, Cpu, History, ChevronDown
 } from 'lucide-react';
 import { Link, useParams } from 'react-router-dom';
 import { motion } from 'motion/react';
@@ -14,6 +15,67 @@ import { apiFetch } from '../lib/api';
 
 const StudentResultDetail = () => {
   const { id } = useParams();
+  const resultId = id;
+  const [showAuditTrail, setShowAuditTrail] = useState(false);
+  const [auditTrail, setAuditTrail] = useState<any[]>([]);
+  const [loadingAudit, setLoadingAudit] = useState(false);
+
+  const loadAuditTrail = async () => {
+    if (!resultId) return;
+    setLoadingAudit(true);
+    try {
+      const res = await apiFetch(`/api/results/${resultId}/audit`);
+      const data = await res.json();
+      setAuditTrail(Array.isArray(data) ? data : []);
+      setShowAuditTrail(true);
+    } catch (err) {
+      console.error('Failed to load audit trail:', err);
+    } finally {
+      setLoadingAudit(false);
+    }
+  };
+
+  const getChangeBadge = (q: any) => {
+    if (!q.lastChangedByRole) return null;
+
+    const config = {
+      MODERATOR: {
+        bg: 'bg-purple-50 border-purple-200',
+        text: 'text-purple-700',
+        icon: ShieldCheck,
+        label: 'Moderator'
+      },
+      LECTURER: {
+        bg: 'bg-blue-50 border-blue-200',
+        text: 'text-blue-700',
+        icon: UserCheck,
+        label: 'Lecturer'
+      },
+      AI: {
+        bg: 'bg-slate-50 border-slate-200',
+        text: 'text-slate-600',
+        icon: Cpu,
+        label: 'AI'
+      }
+    };
+
+    const c = config[q.lastChangedByRole as keyof typeof config];
+    if (!c) return null;
+    const Icon = c.icon;
+
+    return (
+      <div className={`inline-flex items-center gap-1.5 px-2.5 py-1 rounded-lg border text-xs font-medium ${c.bg} ${c.text}`}>
+        <Icon size={11} />
+        Updated by {q.lastChangedByName || c.label}
+        <span className="opacity-60">·</span>
+        <span className="opacity-60">
+          {q.lastChangedAt ? new Date(q.lastChangedAt).toLocaleDateString('en-GB', {
+            day: 'numeric', month: 'short', hour: '2-digit', minute: '2-digit'
+          }) : ''}
+        </span>
+      </div>
+    );
+  };
 
   // Queries
   const { data: result, isLoading, isError } = useQuery({
@@ -130,14 +192,31 @@ const StudentResultDetail = () => {
                            <p className="text-[10px] font-bold text-text-muted uppercase tracking-widest">Question {q.questionNumber}</p>
                            <h3 className="text-lg font-bold text-navy mt-1">{q.topic}</h3>
                         </div>
-                        <div className="text-right">
-                           <p className="text-sm font-bold text-navy">{q.marksAwarded} / {q.marksAvailable}</p>
-                           <span className={cn(
-                              "text-[10px] font-bold uppercase",
-                              q.status === 'CORRECT' ? "text-green-600" : q.status === 'PARTIAL' ? "text-gold" : "text-red-500"
-                           )}>
-                              {q.status}
-                           </span>
+                        <div className="text-right space-y-1">
+                           <div className="flex items-center justify-end gap-2">
+                              <p className="text-sm font-bold text-navy">
+                                 {q.lecturerOverride ?? q.marksAwarded} / {q.marksAvailable}
+                              </p>
+                              <span className={cn(
+                                 "text-[10px] font-bold uppercase",
+                                 q.status === 'CORRECT' ? "text-green-600" : q.status === 'PARTIAL' ? "text-gold" : "text-red-500"
+                              )}>
+                                 {q.status}
+                              </span>
+                           </div>
+
+                           {/* Show change badge if mark was modified */}
+                           {q.lastChangedByRole && q.lastChangedByRole !== 'AI' && (
+                              <div className="flex items-center justify-end gap-2 mt-1">
+                                 {getChangeBadge(q)}
+                                 {/* Show original AI mark for comparison */}
+                                 {q.originalAiMark !== null && q.originalAiMark !== undefined && q.originalAiMark !== (q.lecturerOverride ?? q.marksAwarded) && (
+                                    <span className="text-xs text-slate-400 line-through">
+                                       AI: {q.originalAiMark}
+                                    </span>
+                                 )}
+                              </div>
+                           )}
                         </div>
                      </div>
 
@@ -173,6 +252,99 @@ const StudentResultDetail = () => {
                      </div>
                   </motion.div>
                ))}
+            </div>
+
+            {/* Full Audit History Panel */}
+            <div className="border border-slate-200 bg-white rounded-2xl mt-6 shadow-sm overflow-hidden">
+              <button
+                onClick={showAuditTrail ? () => setShowAuditTrail(false) : loadAuditTrail}
+                className="w-full px-6 py-4 flex items-center justify-between text-sm font-medium text-slate-600 hover:bg-slate-50 transition-colors"
+              >
+                <div className="flex items-center gap-2 font-semibold text-navy">
+                  <History size={15} />
+                  Mark Change History
+                </div>
+                <div className="flex items-center gap-2">
+                  {loadingAudit && <Loader2 size={14} className="animate-spin text-navy" />}
+                  <ChevronDown
+                    size={15}
+                    className={`transition-transform duration-200 ${showAuditTrail ? 'rotate-180' : ''}`}
+                  />
+                </div>
+              </button>
+
+              {showAuditTrail && (
+                <div className="px-6 pb-6 space-y-3 pt-2 border-t border-slate-100">
+                  {auditTrail.length === 0 ? (
+                    <p className="text-xs text-slate-400 text-center py-4">
+                      No mark changes recorded — all marks are original AI marks.
+                    </p>
+                  ) : (
+                    auditTrail.map((entry, idx) => (
+                      <div key={entry.id} className="flex items-start gap-3">
+                        {/* Timeline dot */}
+                        <div className="flex flex-col items-center">
+                          <div className={`w-7 h-7 rounded-full flex items-center justify-center flex-shrink-0 ${
+                            entry.changedByRole === 'MODERATOR'
+                              ? 'bg-purple-100'
+                              : 'bg-blue-100'
+                          }`}>
+                            {entry.changedByRole === 'MODERATOR'
+                              ? <ShieldCheck size={13} className="text-purple-600" />
+                              : <UserCheck size={13} className="text-blue-600" />
+                            }
+                          </div>
+                          {idx < auditTrail.length - 1 && (
+                            <div className="w-0.5 h-6 bg-slate-100 mt-1" />
+                          )}
+                        </div>
+
+                        {/* Entry detail */}
+                        <div className="flex-1 min-w-0 pb-2">
+                          <div className="flex items-center justify-between">
+                            <p className="text-sm font-semibold text-navy">
+                              {entry.changedByName}
+                              <span className={`ml-2 text-xs font-normal px-2 py-0.5 rounded-full ${
+                                entry.changedByRole === 'MODERATOR'
+                                  ? 'bg-purple-100 text-purple-600'
+                                  : 'bg-blue-100 text-blue-600'
+                              }`}>
+                                {entry.changedByRole === 'MODERATOR' ? 'Moderator' : 'Lecturer'}
+                              </span>
+                            </p>
+                            <p className="text-xs text-slate-400">
+                              {new Date(entry.createdAt).toLocaleString('en-GB', {
+                                day: 'numeric', month: 'short',
+                                hour: '2-digit', minute: '2-digit'
+                              })}
+                            </p>
+                          </div>
+
+                          <p className="text-xs text-slate-500 mt-1">
+                            Changed <span className="font-semibold text-slate-700">
+                              Question {entry.questionNumber}
+                            </span> from{' '}
+                            <span className="font-semibold text-red-500 line-through">
+                              {entry.previousMark}
+                            </span>
+                            {' '}to{' '}
+                            <span className="font-semibold text-green-600">
+                              {entry.newMark}
+                            </span>
+                            /{entry.marksAvailable}
+                          </p>
+
+                          {entry.reason && (
+                            <p className="text-xs text-slate-400 mt-1 italic">
+                              "{entry.reason}"
+                            </p>
+                          )}
+                        </div>
+                      </div>
+                    ))
+                  )}
+                </div>
+              )}
             </div>
          </div>
 

@@ -114,6 +114,7 @@ model MarkingSession {
   results             StudentResult[]
   answerSheets        StudentAnswerSheet[]
   moderationOverrides ModerationOverride[]
+  markChangeAudits    MarkChangeAudit[]
 
   @@index([lecturerId])
   @@index([classId])
@@ -178,6 +179,12 @@ model QuestionResult {
   lecturerNote          String?       // ADDED — was missing, override endpoint needs this
   aiConfidence          String?
   consensusNote         String?
+  lastChangedBy         String?   // user ID of last person to change mark
+  lastChangedByName     String?   // name shown in UI
+  lastChangedByRole     String?   // LECTURER | MODERATOR | AI
+  lastChangedAt         DateTime?
+  originalAiMark        Int?      // locked at first marking, never updated
+  auditTrail            MarkChangeAudit[]
   studentResult         StudentResult        @relation(fields: [studentResultId], references: [id])
   moderationOverrides   ModerationOverride[]
 
@@ -233,4 +240,28 @@ model ModerationOverride {
 
   @@index([sessionId])
   @@index([questionResultId])
+}
+
+model MarkChangeAudit {
+  id               String   @id @default(cuid())
+  questionResultId String
+  sessionId        String
+  studentId        String
+  questionNumber   String
+  changedBy        String   // user ID
+  changedByName    String   // full name at time of change
+  changedByRole    String   // LECTURER | MODERATOR
+  previousMark     Int
+  newMark          Int
+  marksAvailable   Int
+  reason           String?  // optional note explaining the change
+  changeType       String   // LECTURER_OVERRIDE | MODERATION_ADJUST
+  createdAt        DateTime @default(now())
+
+  questionResult QuestionResult @relation(fields: [questionResultId], references: [id], onDelete: Cascade)
+  session        MarkingSession @relation(fields: [sessionId], references: [id], onDelete: Cascade)
+
+  @@index([questionResultId])
+  @@index([sessionId])
+  @@index([studentId])
 }
