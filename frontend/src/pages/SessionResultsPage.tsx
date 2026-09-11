@@ -219,6 +219,7 @@ const SessionResultsPage = () => {
   const [moderatorEmail, setModeratorEmail] = useState('');
   const [moderatorNote, setModeratorNote] = useState('');
   const [copiedModerationLink, setCopiedModerationLink] = useState(false);
+  const [isDownloading, setIsDownloading] = useState(false);
 
   const sendModerationMutation = useMutation({
     mutationFn: async () => {
@@ -290,9 +291,10 @@ const SessionResultsPage = () => {
   };
 
   const handleDownloadReports = () => {
+    setIsDownloading(true);
     const token = safeGetItem('markai_token');
-    // Using simple window.open or a link for download
     window.location.href = `/api/sessions/${id}/download-reports?token=${token}`;
+    setTimeout(() => setIsDownloading(false), 2500);
   };
 
   // Detect when marking completes
@@ -417,37 +419,56 @@ const SessionResultsPage = () => {
             </div>
           </div>
           
-          <div className="flex gap-3">
+          <div className="flex items-center flex-wrap gap-2.5">
              {hasResults && (
                <>
                  <button 
                    onClick={handleDownloadReports}
-                   className="btn-ghost flex items-center gap-2 text-xs border border-border"
+                   disabled={isDownloading}
+                   className="group flex items-center gap-2 px-4 py-2.5 bg-white border border-slate-200 text-slate-700 hover:text-navy hover:border-slate-300 hover:bg-slate-50/80 rounded-xl font-medium text-sm whitespace-nowrap shadow-xs hover:shadow transition-all active:scale-[0.98] disabled:opacity-60"
+                   title="Download all student reports as a ZIP archive"
                  >
-                   <Download size={14} /> Download Reports (ZIP)
+                   {isDownloading ? (
+                     <Loader2 size={15} className="animate-spin text-navy" />
+                   ) : (
+                     <Download size={15} className="text-slate-500 group-hover:text-navy transition-colors" />
+                   )}
+                   <span>{isDownloading ? 'Preparing ZIP...' : 'Download Reports (ZIP)'}</span>
                  </button>
+
                  <button 
                    onClick={() => emailStudentsMutation.mutate()}
                    disabled={emailStudentsMutation.isPending}
-                   className="btn-ghost flex items-center gap-2 text-xs border border-border"
+                   className="group flex items-center gap-2 px-4 py-2.5 bg-white border border-slate-200 text-slate-700 hover:text-navy hover:border-slate-300 hover:bg-slate-50/80 rounded-xl font-medium text-sm whitespace-nowrap shadow-xs hover:shadow transition-all active:scale-[0.98] disabled:opacity-50 disabled:cursor-not-allowed"
+                   title="Send email notifications and results to students"
                  >
-                   {emailStudentsMutation.isPending ? <Loader2 size={14} className="animate-spin" /> : <Mail size={14} />}
-                   {emailStudentsMutation.isPending ? 'Sending...' : 'Email Students'}
+                   {emailStudentsMutation.isPending ? (
+                     <Loader2 size={15} className="animate-spin text-navy" />
+                   ) : (
+                     <Mail size={15} className="text-slate-500 group-hover:text-navy transition-colors" />
+                   )}
+                   <span>{emailStudentsMutation.isPending ? 'Sending...' : 'Email Students'}</span>
                  </button>
+
                  <button 
                    onClick={() => approveAllMutation.mutate()}
                    disabled={approveAllMutation.isPending || session?.status === 'COMPLETE'}
-                   className="btn-primary flex items-center gap-2 text-xs"
+                   className="flex items-center gap-2 px-4 py-2.5 bg-navy text-white hover:bg-navy/90 rounded-xl font-medium text-sm whitespace-nowrap shadow-xs hover:shadow transition-all active:scale-[0.98] disabled:opacity-50 disabled:cursor-not-allowed"
                  >
-                   {approveAllMutation.isPending ? <Loader2 size={14} className="animate-spin" /> : <CheckCircle2 size={14} />}
-                   {session?.status === 'COMPLETE' ? 'All Approved' : 'Approve All Results'}
+                   {approveAllMutation.isPending ? (
+                     <Loader2 size={15} className="animate-spin text-accent" />
+                   ) : (
+                     <CheckCircle2 size={15} className="text-accent" />
+                   )}
+                   <span>{session?.status === 'COMPLETE' ? 'All Approved' : 'Approve All Results'}</span>
                  </button>
+
                  <button
                    onClick={() => setShowModerationModal(true)}
-                   className="flex items-center gap-2 px-4 py-2.5 border-2 border-navy text-navy rounded-xl hover:bg-navy hover:text-white transition-all font-medium text-sm"
+                   className="flex items-center gap-2 px-4 py-2.5 border-2 border-navy text-navy rounded-xl hover:bg-navy hover:text-white transition-all font-medium text-sm whitespace-nowrap shadow-xs active:scale-[0.98]"
                  >
                    <Send size={15} />
-                   Send for Moderation
+                   <span>Send for Moderation</span>
                  </button>
                </>
              )}
@@ -455,20 +476,20 @@ const SessionResultsPage = () => {
                <button 
                  onClick={handleStartMarking} 
                  disabled={isMarking}
-                 className="btn-primary flex items-center gap-2 text-xs"
+                 className="flex items-center gap-2 px-5 py-2.5 bg-navy text-white hover:bg-navy/90 rounded-xl font-medium text-sm whitespace-nowrap shadow-xs active:scale-[0.98] disabled:opacity-50"
                >
-                 {isMarking ? <Loader2 size={14} className="animate-spin" /> : <Play size={14} />}
-                 {isMarking ? 'Starting...' : 'Start AI Marking'}
+                 {isMarking ? <Loader2 size={15} className="animate-spin text-accent" /> : <Play size={15} className="text-accent" />}
+                 <span>{isMarking ? 'Starting...' : 'Start AI Marking'}</span>
                </button>
              )}
               {session?.status === 'ERROR' && (
                 <button 
                   onClick={handleRetryMarking} 
                   disabled={isMarking}
-                  className="btn-primary flex items-center gap-2 text-xs bg-red-600 hover:bg-red-700"
+                  className="flex items-center gap-2 px-5 py-2.5 bg-red-600 text-white hover:bg-red-700 rounded-xl font-medium text-sm whitespace-nowrap shadow-xs active:scale-[0.98] disabled:opacity-50"
                 >
-                  <RotateCw size={14} className={isMarking ? 'animate-spin' : ''} />
-                  {isMarking ? 'Retrying...' : 'Retry Marking'}
+                  <RotateCw size={15} className={isMarking ? 'animate-spin' : ''} />
+                  <span>{isMarking ? 'Retrying...' : 'Retry Marking'}</span>
                 </button>
               )}
           </div>
@@ -476,65 +497,75 @@ const SessionResultsPage = () => {
       </div>
 
       {/* Moderation Status Banner */}
-      {session?.moderationStatus && (
-        <div className="mb-8 p-5 bg-surface rounded-md border border-border flex flex-col md:flex-row md:items-center justify-between gap-4 shadow-sm">
-          <div className="flex items-center gap-3.5">
-            <div className={cn(
-              "w-10 h-10 rounded-full flex items-center justify-center shrink-0",
-              session.moderationStatus === 'APPROVED' ? "bg-emerald-100 text-emerald-700" :
-              session.moderationStatus === 'RETURNED' ? "bg-amber-100 text-amber-700" :
-              "bg-blue-100 text-blue-700"
-            )}>
-              <ShieldCheck size={20} />
-            </div>
-            <div>
-              <div className="flex items-center gap-2">
-                <h3 className="font-bold text-navy text-sm">External Moderation / Second Marking</h3>
-                <span className={cn(
-                  "badge text-[10px] px-2 py-0.5 font-bold",
-                  session.moderationStatus === 'APPROVED' ? "bg-emerald-100 text-emerald-800" :
-                  session.moderationStatus === 'RETURNED' ? "bg-amber-100 text-amber-800" :
-                  "bg-blue-100 text-blue-800"
-                )}>
-                  {session.moderationStatus}
-                </span>
-              </div>
-              <p className="text-xs text-text-muted mt-0.5">
-                Moderator: <strong>{session.moderatorEmail || 'Invited Moderator'}</strong>
-                {session.moderatorNote && ` • Note: "${session.moderatorNote}"`}
-              </p>
-              {session.moderationFeedback && (
-                <p className="text-xs text-amber-900 bg-amber-50 p-2.5 rounded mt-2 border border-amber-200">
-                  <strong>Moderator Feedback:</strong> {session.moderationFeedback}
-                </p>
-              )}
-            </div>
-          </div>
+      {session?.moderationStatus && (() => {
+        const isApproved = session.moderationStatus === 'APPROVED' || session.moderationStatus === 'MODERATION_APPROVED';
+        const isReturned = session.moderationStatus === 'RETURNED' || session.moderationStatus === 'MODERATION_RETURNED';
+        const isReview = session.moderationStatus === 'UNDER_REVIEW';
 
-          <div className="flex items-center gap-2">
-            {session.moderatorToken && (
+        return (
+          <div className="mb-8 p-5 bg-white rounded-2xl border border-slate-200/80 flex flex-col md:flex-row md:items-center justify-between gap-4 shadow-sm">
+            <div className="flex items-center gap-3.5">
+              <div className={cn(
+                "w-10 h-10 rounded-xl flex items-center justify-center shrink-0",
+                isApproved ? "bg-emerald-100 text-emerald-700" :
+                isReturned ? "bg-red-100 text-red-700" :
+                isReview ? "bg-blue-100 text-blue-700" :
+                "bg-amber-100 text-amber-700"
+              )}>
+                <ShieldCheck size={20} />
+              </div>
+              <div>
+                <div className="flex items-center gap-2">
+                  <h3 className="font-bold text-navy text-sm">External Moderation / Second Marking</h3>
+                  <span className={cn(
+                    "px-2.5 py-0.5 rounded-full text-[10px] font-bold border uppercase tracking-wider",
+                    isApproved ? "bg-emerald-50 text-emerald-700 border-emerald-200" :
+                    isReturned ? "bg-red-50 text-red-700 border-red-200" :
+                    isReview ? "bg-blue-50 text-blue-700 border-blue-200" :
+                    "bg-amber-50 text-amber-700 border-amber-200"
+                  )}>
+                    {isApproved ? 'Moderation Approved' :
+                     isReturned ? 'Returned for Review' :
+                     isReview ? 'Under Review' : 'Awaiting Moderator'}
+                  </span>
+                </div>
+                <p className="text-xs text-text-muted mt-0.5">
+                  Moderator: <strong className="text-navy">{session.moderatorEmail || 'Invited Moderator'}</strong>
+                  {session.moderatorNote && ` • Note: "${session.moderatorNote}"`}
+                </p>
+                {session.moderationFeedback && (
+                  <p className="text-xs text-amber-900 bg-amber-50/80 p-2.5 rounded-xl mt-2 border border-amber-200/60">
+                    <strong>Moderator Feedback:</strong> {session.moderationFeedback}
+                  </p>
+                )}
+              </div>
+            </div>
+
+            <div className="flex items-center gap-2.5">
+              {session.moderatorToken && (
+                <button
+                  onClick={() => {
+                    const url = `${window.location.origin}/moderate/${session.moderatorToken}`;
+                    navigator.clipboard.writeText(url);
+                    setCopiedModerationLink(true);
+                    setTimeout(() => setCopiedModerationLink(false), 2500);
+                  }}
+                  className="px-3.5 py-2 bg-white border border-slate-200 text-slate-700 hover:text-navy hover:bg-slate-50 rounded-xl text-xs font-medium flex items-center gap-1.5 transition-all shadow-xs active:scale-[0.98]"
+                >
+                  {copiedModerationLink ? <Check size={13} className="text-emerald-600" /> : <Copy size={13} />}
+                  <span>{copiedModerationLink ? 'Copied Link!' : 'Copy Moderator Link'}</span>
+                </button>
+              )}
               <button
-                onClick={() => {
-                  const url = `${window.location.origin}/moderate/${session.moderatorToken}`;
-                  navigator.clipboard.writeText(url);
-                  setCopiedModerationLink(true);
-                  setTimeout(() => setCopiedModerationLink(false), 2500);
-                }}
-                className="btn-ghost border border-border text-xs flex items-center gap-1.5"
+                onClick={() => setShowModerationModal(true)}
+                className="px-3.5 py-2 bg-white border border-slate-200 text-slate-700 hover:text-navy hover:bg-slate-50 rounded-xl text-xs font-medium transition-all shadow-xs active:scale-[0.98]"
               >
-                {copiedModerationLink ? <Check size={13} className="text-emerald-600" /> : <Copy size={13} />}
-                {copiedModerationLink ? 'Copied Link!' : 'Copy Moderator Link'}
+                {isApproved ? 'View Details' : 'Resend / Update'}
               </button>
-            )}
-            <button
-              onClick={() => setShowModerationModal(true)}
-              className="btn-ghost border border-border text-xs"
-            >
-              {session.moderationStatus === 'APPROVED' ? 'View Details' : 'Resend / Update'}
-            </button>
+            </div>
           </div>
-        </div>
-      )}
+        );
+      })()}
 
       {/* Marking Progress Banner */}
       {isCurrentlyMarking && (
