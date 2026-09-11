@@ -168,6 +168,8 @@ const NewSessionPage = () => {
     retryAvailableAt?: number | null;
   }[]>([]);
 
+  const [previewIndex, setPreviewIndex] = useState<number | null>(null);
+
   // Step 4 data
   const [markingStrictness, setMarkingStrictness] = useState('Standard');
   const [feedbackDetail, setFeedbackDetail] = useState('Detailed');
@@ -1250,10 +1252,10 @@ const NewSessionPage = () => {
                                         {s.extractMethod === 'gemini-vision' ? '🤖 AI OCR' : '📄 Text'}
                                       </span>
                                       <button 
-                                        onClick={() => setStudentSheets(prev => prev.map((item, i) => i === idx ? { ...item, previewOpen: !item.previewOpen } : item))}
-                                        className="text-[8px] font-bold uppercase text-accent hover:underline"
+                                        onClick={() => setPreviewIndex(idx)}
+                                        className="text-[8px] font-bold uppercase text-accent hover:underline cursor-pointer"
                                       >
-                                        {s.previewOpen ? '▼ Hide Preview' : '▶ Preview Text'}
+                                        ▶ Preview Text
                                       </button>
                                     </div>
                                   </div>
@@ -1301,13 +1303,6 @@ const NewSessionPage = () => {
                                 }
                                 onUpdateText={(text) => updateStudentText(idx, text)}
                               />
-                            )}
-                            {s.previewOpen && (
-                               <div className="mt-2 h-56 rounded-lg border border-slate-200 bg-slate-50 p-3 overflow-y-auto">
-                                 <pre className="text-xs text-slate-700 whitespace-pre-wrap break-words leading-relaxed font-sans">
-                                   {s.extractedText || ''}
-                                 </pre>
-                               </div>
                             )}
                           </td>
                           <td className="px-6 py-4 text-right">
@@ -1405,10 +1400,28 @@ const NewSessionPage = () => {
                             {studentSheets.map((s, idx) => (
                               <tr key={idx} className="border-b border-border last:border-0">
                                 <td className="px-6 py-4">
-                                  <div className="flex items-center gap-2">
-                                    <FileText size={14} className="text-text-muted" />
-                                    <span className="text-xs font-medium text-navy truncate max-w-[200px]">{s.file?.name}</span>
-                                    {s.studentId && <span className="px-1.5 py-0.5 bg-green-100 text-green-700 rounded text-[8px] font-bold">Auto-matched</span>}
+                                  <div className="flex flex-col">
+                                    <div className="flex items-center gap-2">
+                                      <FileText size={14} className="text-text-muted shrink-0" />
+                                      <span className="text-xs font-medium text-navy truncate max-w-[200px]">{s.file?.name}</span>
+                                      {s.studentId && <span className="px-1.5 py-0.5 bg-green-100 text-green-700 rounded text-[8px] font-bold shrink-0">Auto-matched</span>}
+                                    </div>
+                                    {s.uploaded && (
+                                      <div className="flex items-center gap-2 mt-1 ml-5.5">
+                                        <span className={cn(
+                                          "px-1.5 py-0.5 rounded text-[8px] font-bold uppercase shrink-0",
+                                          s.extractMethod === 'gemini-vision' ? "bg-blue-100 text-blue-600" : "bg-green-100 text-green-600"
+                                        )}>
+                                          {s.extractMethod === 'gemini-vision' ? '🤖 AI OCR' : '📄 Text'}
+                                        </span>
+                                        <button 
+                                          onClick={() => setPreviewIndex(idx)}
+                                          className="text-[8px] font-bold uppercase text-accent hover:underline cursor-pointer"
+                                        >
+                                          ▶ Preview Text
+                                        </button>
+                                      </div>
+                                    )}
                                   </div>
                                 </td>
                                 <td className="px-6 py-4">
@@ -1440,6 +1453,99 @@ const NewSessionPage = () => {
                   )}
                 </div>
               )}
+
+              {/* Student Sheet Text Preview Modal */}
+              <AnimatePresence>
+                {previewIndex !== null && studentSheets[previewIndex] && (
+                  <div 
+                    className="fixed inset-0 z-50 flex items-center justify-center p-4 bg-black/40 backdrop-blur-sm"
+                    onClick={() => setPreviewIndex(null)}
+                  >
+                    <motion.div
+                      initial={{ opacity: 0, scale: 0.95, y: 10 }}
+                      animate={{ opacity: 1, scale: 1, y: 0 }}
+                      exit={{ opacity: 0, scale: 0.95, y: 10 }}
+                      transition={{ duration: 0.15 }}
+                      className="bg-white rounded-2xl shadow-2xl w-full max-w-3xl max-h-[85vh] flex flex-col overflow-hidden border border-border"
+                      onClick={(e) => e.stopPropagation()}
+                    >
+                      {/* Header */}
+                      <div className="px-6 py-4 border-b border-border flex items-center justify-between bg-bg/50">
+                        <div className="flex items-center gap-3 min-w-0">
+                          <div className="w-9 h-9 rounded-xl bg-navy/10 flex items-center justify-center text-navy shrink-0">
+                            <FileText size={18} />
+                          </div>
+                          <div className="min-w-0">
+                            <h3 className="font-bold text-navy text-sm truncate">
+                              {studentSheets[previewIndex]?.file?.name || 'Answer Sheet Text Preview'}
+                            </h3>
+                            <div className="flex items-center gap-2 mt-0.5">
+                              {studentSheets[previewIndex]?.studentId && (
+                                <span className="text-[10px] text-text-muted font-medium">
+                                  ID: <strong className="text-navy">{studentSheets[previewIndex].studentId}</strong>
+                                </span>
+                              )}
+                              {studentSheets[previewIndex]?.studentName && (
+                                <>
+                                  <span className="text-[10px] text-text-muted">•</span>
+                                  <span className="text-[10px] text-text-muted font-medium truncate max-w-[150px]">
+                                    {studentSheets[previewIndex].studentName}
+                                  </span>
+                                </>
+                              )}
+                              <span className={cn(
+                                "px-1.5 py-0.5 rounded text-[8px] font-bold uppercase",
+                                studentSheets[previewIndex]?.extractMethod === 'gemini-vision' 
+                                  ? "bg-blue-100 text-blue-600" 
+                                  : "bg-green-100 text-green-600"
+                              )}>
+                                {studentSheets[previewIndex]?.extractMethod === 'gemini-vision' ? '🤖 AI OCR' : '📄 Text'}
+                              </span>
+                            </div>
+                          </div>
+                        </div>
+
+                        <button
+                          onClick={() => setPreviewIndex(null)}
+                          className="p-1.5 rounded-lg text-text-muted hover:text-navy hover:bg-slate-100 transition-colors cursor-pointer"
+                        >
+                          <X size={18} />
+                        </button>
+                      </div>
+
+                      {/* Body: Extracted Text */}
+                      <div className="p-6 overflow-y-auto max-h-[70vh]">
+                        {studentSheets[previewIndex]?.extractedText ? (
+                          <div className="rounded-xl border border-slate-200 bg-slate-50/80 p-4 shadow-inner">
+                            <pre className="text-xs text-slate-700 whitespace-pre-wrap break-words leading-relaxed font-sans">
+                              {studentSheets[previewIndex].extractedText}
+                            </pre>
+                          </div>
+                        ) : (
+                          <div className="py-12 text-center text-text-muted text-xs italic">
+                            No extracted text available for this sheet.
+                          </div>
+                        )}
+                      </div>
+
+                      {/* Footer */}
+                      <div className="px-6 py-3 border-t border-border bg-bg/50 flex items-center justify-between text-xs text-text-muted">
+                        <span>
+                          {studentSheets[previewIndex]?.extractedText 
+                            ? `${studentSheets[previewIndex].extractedText.length.toLocaleString()} characters extracted` 
+                            : '0 characters'}
+                        </span>
+                        <button
+                          onClick={() => setPreviewIndex(null)}
+                          className="px-4 py-1.5 rounded-lg text-xs font-semibold text-navy bg-white border border-border hover:bg-slate-50 transition-all cursor-pointer shadow-xs"
+                        >
+                          Close
+                        </button>
+                      </div>
+                    </motion.div>
+                  </div>
+                )}
+              </AnimatePresence>
 
               {/* Progress Summary Bar */}
               <div className="fixed bottom-0 left-0 right-0 bg-white border-t border-border p-4 z-20 shadow-lg">
