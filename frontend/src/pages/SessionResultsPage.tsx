@@ -381,7 +381,7 @@ const SessionResultsPage = () => {
           <ArrowLeft size={16} /> Back to Sessions
         </Link>
 
-        <div className="flex flex-col md:flex-row justify-between items-start md:items-end gap-6">
+        <div className="flex flex-col md:flex-row justify-between items-start md:items-center gap-6">
           <div className="space-y-2">
             <div className="flex items-center gap-3">
               <h1 className="text-3xl font-serif font-bold text-navy">{session?.name}</h1>
@@ -417,37 +417,53 @@ const SessionResultsPage = () => {
             </div>
           </div>
 
-          <div className="flex gap-3">
+          <div className="flex flex-wrap items-center gap-2.5">
             {hasResults && (
               <>
                 <button
                   onClick={handleDownloadReports}
-                  className="btn-ghost flex items-center gap-2 text-xs border border-border"
+                  className="group inline-flex items-center gap-2 px-4 py-2.5 rounded-xl text-xs font-semibold text-slate-700 bg-white border border-slate-200/90 hover:border-slate-300 hover:text-navy hover:bg-slate-50/80 shadow-xs hover:shadow transition-all duration-150 active:scale-[0.98] whitespace-nowrap cursor-pointer"
                 >
-                  <Download size={14} /> Download Reports (ZIP)
+                  <Download size={14} className="text-slate-400 group-hover:text-navy transition-colors shrink-0" />
+                  <span>Download Reports (ZIP)</span>
                 </button>
                 <button
                   onClick={() => emailStudentsMutation.mutate()}
                   disabled={emailStudentsMutation.isPending}
-                  className="btn-ghost flex items-center gap-2 text-xs border border-border"
+                  className="group inline-flex items-center gap-2 px-4 py-2.5 rounded-xl text-xs font-semibold text-slate-700 bg-white border border-slate-200/90 hover:border-slate-300 hover:text-navy hover:bg-slate-50/80 shadow-xs hover:shadow transition-all duration-150 active:scale-[0.98] disabled:opacity-50 disabled:cursor-not-allowed whitespace-nowrap cursor-pointer"
                 >
-                  {emailStudentsMutation.isPending ? <Loader2 size={14} className="animate-spin" /> : <Mail size={14} />}
-                  {emailStudentsMutation.isPending ? 'Sending...' : 'Email Students'}
+                  {emailStudentsMutation.isPending ? (
+                    <Loader2 size={14} className="animate-spin text-navy shrink-0" />
+                  ) : (
+                    <Mail size={14} className="text-slate-400 group-hover:text-navy transition-colors shrink-0" />
+                  )}
+                  <span>{emailStudentsMutation.isPending ? 'Sending...' : 'Email Students'}</span>
                 </button>
-                <button
-                  onClick={() => approveAllMutation.mutate()}
-                  disabled={approveAllMutation.isPending || session?.status === 'COMPLETE'}
-                  className="btn-primary flex items-center gap-2 text-xs"
-                >
-                  {approveAllMutation.isPending ? <Loader2 size={14} className="animate-spin" /> : <CheckCircle2 size={14} />}
-                  {session?.status === 'COMPLETE' ? 'All Approved' : 'Approve All Results'}
-                </button>
+                {session?.status === 'COMPLETE' ? (
+                  <div className="inline-flex items-center gap-2 px-4 py-2.5 rounded-xl text-xs font-semibold text-emerald-700 bg-emerald-50 border border-emerald-200/80 shadow-xs whitespace-nowrap">
+                    <CheckCircle2 size={14} className="text-emerald-600 shrink-0" />
+                    <span>All Approved</span>
+                  </div>
+                ) : (
+                  <button
+                    onClick={() => approveAllMutation.mutate()}
+                    disabled={approveAllMutation.isPending}
+                    className="group inline-flex items-center gap-2 px-4.5 py-2.5 rounded-xl text-xs font-semibold text-white bg-navy hover:bg-navy-mid shadow-xs hover:shadow-md hover:shadow-navy/20 transition-all duration-150 active:scale-[0.98] disabled:opacity-50 disabled:cursor-not-allowed whitespace-nowrap cursor-pointer"
+                  >
+                    {approveAllMutation.isPending ? (
+                      <Loader2 size={14} className="animate-spin text-white shrink-0" />
+                    ) : (
+                      <CheckCircle2 size={14} className="text-accent shrink-0" />
+                    )}
+                    <span>Approve All Results</span>
+                  </button>
+                )}
                 <button
                   onClick={() => setShowModerationModal(true)}
-                  className="flex items-center gap-2 px-4 py-2.5 border-2 border-navy text-navy rounded-xl hover:bg-navy hover:text-white transition-all font-medium text-sm"
+                  className="group inline-flex items-center gap-2 px-4.5 py-2.5 rounded-xl text-xs font-semibold text-indigo-950 bg-gradient-to-r from-indigo-50 to-blue-50 hover:from-indigo-100 hover:to-blue-100 border border-indigo-200/80 hover:border-indigo-300 shadow-xs hover:shadow transition-all duration-150 active:scale-[0.98] whitespace-nowrap cursor-pointer"
                 >
-                  <Send size={15} />
-                  Send for Moderation
+                  <Send size={13} className="text-indigo-600 group-hover:translate-x-0.5 group-hover:-translate-y-0.5 transition-transform shrink-0" />
+                  <span>Send for Moderation</span>
                 </button>
               </>
             )}
@@ -455,20 +471,24 @@ const SessionResultsPage = () => {
               <button
                 onClick={handleStartMarking}
                 disabled={isMarking}
-                className="btn-primary flex items-center gap-2 text-xs"
+                className="group inline-flex items-center gap-2 px-5 py-2.5 rounded-xl text-xs font-bold text-navy bg-accent hover:bg-accent-dim shadow-xs hover:shadow-md hover:shadow-accent/20 transition-all duration-150 active:scale-[0.98] disabled:opacity-50 whitespace-nowrap cursor-pointer"
               >
-                {isMarking ? <Loader2 size={14} className="animate-spin" /> : <Play size={14} />}
-                {isMarking ? 'Starting...' : 'Start AI Marking'}
+                {isMarking ? (
+                  <Loader2 size={14} className="animate-spin shrink-0" />
+                ) : (
+                  <Play size={13} className="fill-current shrink-0" />
+                )}
+                <span>{isMarking ? 'Starting...' : 'Start AI Marking'}</span>
               </button>
             )}
             {session?.status === 'ERROR' && (
               <button
                 onClick={handleRetryMarking}
                 disabled={isMarking}
-                className="btn-primary flex items-center gap-2 text-xs bg-red-600 hover:bg-red-700"
+                className="group inline-flex items-center gap-2 px-4.5 py-2.5 rounded-xl text-xs font-semibold text-white bg-red-600 hover:bg-red-700 shadow-xs hover:shadow-md transition-all duration-150 active:scale-[0.98] disabled:opacity-50 whitespace-nowrap cursor-pointer"
               >
-                <RotateCw size={14} className={isMarking ? 'animate-spin' : ''} />
-                {isMarking ? 'Retrying...' : 'Retry Marking'}
+                <RotateCw size={14} className={cn("shrink-0", isMarking && "animate-spin")} />
+                <span>{isMarking ? 'Retrying...' : 'Retry Marking'}</span>
               </button>
             )}
           </div>
@@ -511,7 +531,7 @@ const SessionResultsPage = () => {
             </div>
           </div>
 
-          <div className="flex items-center gap-2">
+          <div className="flex items-center gap-2.5 shrink-0">
             {session.moderatorToken && (
               <button
                 onClick={() => {
@@ -520,15 +540,15 @@ const SessionResultsPage = () => {
                   setCopiedModerationLink(true);
                   setTimeout(() => setCopiedModerationLink(false), 2500);
                 }}
-                className="btn-ghost border border-border text-xs flex items-center gap-1.5"
+                className="inline-flex items-center gap-2 px-3.5 py-2 rounded-xl text-xs font-semibold bg-white border border-slate-200/90 text-slate-700 hover:text-navy hover:bg-slate-50/80 shadow-xs hover:shadow transition-all active:scale-[0.98] cursor-pointer"
               >
-                {copiedModerationLink ? <Check size={13} className="text-emerald-600" /> : <Copy size={13} />}
-                {copiedModerationLink ? 'Copied Link!' : 'Copy Moderator Link'}
+                {copiedModerationLink ? <Check size={13} className="text-emerald-600 shrink-0" /> : <Copy size={13} className="text-slate-400 shrink-0" />}
+                <span>{copiedModerationLink ? 'Copied Link!' : 'Copy Moderator Link'}</span>
               </button>
             )}
             <button
               onClick={() => setShowModerationModal(true)}
-              className="btn-ghost border border-border text-xs"
+              className="inline-flex items-center gap-2 px-3.5 py-2 rounded-xl text-xs font-semibold bg-indigo-50/80 border border-indigo-200/80 text-indigo-900 hover:bg-indigo-100 shadow-xs hover:shadow transition-all active:scale-[0.98] cursor-pointer"
             >
               {session.moderationStatus === 'APPROVED' ? 'View Details' : 'Resend / Update'}
             </button>

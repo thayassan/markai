@@ -86,6 +86,11 @@ const StudentResultDetail = () => {
     })
   });
 
+  const handleDownloadPdf = () => {
+    const token = safeGetItem('markai_token');
+    window.location.href = `/api/results/${id}/pdf?token=${token}`;
+  };
+
   if (isLoading) return (
     <DashboardLayout>
       <div className="h-full flex items-center justify-center py-20">
@@ -112,7 +117,7 @@ const StudentResultDetail = () => {
           <ArrowLeft size={16} /> Back to Dashboard
         </Link>
         
-        <div className="flex flex-col md:flex-row justify-between items-start md:items-end gap-6">
+        <div className="flex flex-col md:flex-row justify-between items-start md:items-center gap-6">
           <div className="space-y-4">
              <h1 className="text-3xl font-serif font-bold text-navy">{result?.session?.subject}</h1>
              <div className="flex gap-4 text-[10px] font-bold text-text-muted uppercase tracking-widest">
@@ -123,8 +128,12 @@ const StudentResultDetail = () => {
                 <span>{result?.session?.sessionType}</span>
              </div>
           </div>
-          <button className="btn-primary flex items-center gap-2 text-xs">
-            <Download size={14} /> Download PDF Report
+          <button 
+            onClick={handleDownloadPdf}
+            className="group inline-flex items-center gap-2 px-4.5 py-2.5 rounded-xl text-xs font-semibold text-white bg-navy hover:bg-navy-mid shadow-xs hover:shadow-md hover:shadow-navy/20 transition-all duration-150 active:scale-[0.98] whitespace-nowrap cursor-pointer"
+          >
+            <Download size={14} className="text-accent shrink-0" />
+            <span>Download PDF Report</span>
           </button>
         </div>
       </div>

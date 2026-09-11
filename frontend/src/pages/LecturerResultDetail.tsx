@@ -191,10 +191,10 @@ const LecturerResultDetail = () => {
           <ArrowLeft size={16} /> Back to Session Results
         </Link>
         
-        <div className="flex flex-col md:flex-row justify-between items-start md:items-end gap-6">
+        <div className="flex flex-col md:flex-row justify-between items-start md:items-center gap-6">
           <div className="space-y-4">
             <div className="flex items-center gap-4">
-               <div className="w-16 h-16 rounded-2xl bg-navy text-white flex items-center justify-center font-serif text-2xl font-bold">
+               <div className="w-16 h-16 rounded-2xl bg-navy text-white flex items-center justify-center font-serif text-2xl font-bold shadow-sm shrink-0">
                  {result?.studentName?.charAt(0) || result?.studentId?.charAt(0)}
                </div>
                <div>
@@ -211,18 +211,25 @@ const LecturerResultDetail = () => {
             </div>
           </div>
 
-          <div className="flex gap-3">
+          <div className="flex flex-wrap items-center gap-2.5">
              <button 
                onClick={handleDownloadPdf}
-               className="btn-ghost flex items-center gap-2 text-xs border border-border"
+               className="group inline-flex items-center gap-2 px-4 py-2.5 rounded-xl text-xs font-semibold text-slate-700 bg-white border border-slate-200/90 hover:border-slate-300 hover:text-navy hover:bg-slate-50/80 shadow-xs hover:shadow transition-all duration-150 active:scale-[0.98] whitespace-nowrap cursor-pointer"
              >
-               <Download size={14} /> Download Report (PDF)
+               <Download size={14} className="text-slate-400 group-hover:text-navy transition-colors shrink-0" />
+               <span>Download Report (PDF)</span>
              </button>
-             <button className={cn(
-               "btn-primary flex items-center gap-2 text-xs px-8",
-               Object.keys(overrides).length === 0 && "opacity-50"
-             )}>
-               <CheckCircle2 size={14} /> Finalize Paper
+             <button 
+               className={cn(
+                 "group inline-flex items-center gap-2 px-5 py-2.5 rounded-xl text-xs font-semibold whitespace-nowrap transition-all duration-150 shadow-xs",
+                 Object.keys(overrides).length > 0
+                   ? "bg-navy hover:bg-navy-mid text-white shadow-xs hover:shadow-md hover:shadow-navy/20 hover:-translate-y-0.5 active:scale-[0.98] cursor-pointer"
+                   : "bg-slate-100 text-slate-400 border border-slate-200/80 cursor-not-allowed opacity-70"
+               )}
+               disabled={Object.keys(overrides).length === 0}
+             >
+               <CheckCircle2 size={14} className={cn("shrink-0", Object.keys(overrides).length > 0 ? "text-accent" : "text-slate-400")} />
+               <span>Finalize Paper</span>
              </button>
           </div>
         </div>
@@ -256,13 +263,15 @@ const LecturerResultDetail = () => {
             <button
               onClick={() => reEvaluateMutation.mutate()}
               disabled={reEvaluateMutation.isPending}
-              className="w-full h-full min-h-[140px] flex flex-col items-center justify-center gap-2 rounded-xl bg-navy text-white border-2 border-navy hover:bg-navy/90 hover:shadow-lg transition-all disabled:opacity-60 disabled:cursor-not-allowed"
+              className="w-full h-full min-h-[140px] flex flex-col items-center justify-center gap-2.5 rounded-card bg-gradient-to-b from-navy to-navy-mid text-white border border-navy/20 hover:shadow-lg hover:-translate-y-0.5 transition-all duration-200 active:scale-[0.99] disabled:opacity-60 disabled:cursor-not-allowed group cursor-pointer p-5"
             >
-              <RefreshCw size={20} className={reEvaluateMutation.isPending ? 'animate-spin' : ''} />
-              <span className="text-sm font-semibold">
+              <div className="w-10 h-10 rounded-xl bg-white/10 flex items-center justify-center text-accent group-hover:scale-110 transition-transform">
+                <RefreshCw size={18} className={reEvaluateMutation.isPending ? 'animate-spin' : ''} />
+              </div>
+              <span className="text-sm font-bold tracking-wide">
                 {reEvaluateMutation.isPending ? 'Re-evaluating...' : 'Re-evaluate with AI'}
               </span>
-              <span className="text-xs text-white/60 font-normal">
+              <span className="text-xs text-white/70 font-normal text-center">
                 Re-checks this score for accuracy
               </span>
             </button>
