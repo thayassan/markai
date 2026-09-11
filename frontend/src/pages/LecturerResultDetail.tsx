@@ -304,35 +304,94 @@ const LecturerResultDetail = () => {
                   </tr>
                </thead>
                <tbody className="divide-y divide-border">
-                  {result?.questions.map((q: any) => (
-                     <tr key={q.id} className="group hover:bg-bg/10 transition-colors">
-                        <td className="px-8 py-5">
-                           <div className={cn(
-                              "w-8 h-8 rounded-lg flex items-center justify-center font-bold text-xs",
-                              q.status === 'CORRECT' ? "bg-green-100 text-green-700" :
-                              q.status === 'PARTIAL' ? "bg-gold-pale text-gold" : "bg-red-100 text-red-700"
-                           )}>
-                              {q.questionNumber}
-                           </div>
-                        </td>
-                        <td className="px-8 py-5">
-                           <div className="space-y-2">
-                              <p className="text-sm font-bold text-navy">{q.topic}</p>
-                              <div className="bg-white/50 border border-border p-3 rounded-lg text-xs text-text-muted leading-relaxed">
-                                 <Sparkles size={12} className="inline mr-1 text-accent" />
-                                 {q.aiFeedback}
-                              </div>
-                              {q.aiConfidence === 'Low' && (
-                                <div className="mt-1 flex items-center gap-1.5 text-[10px] text-amber-600 font-bold bg-amber-50/50 border border-amber-200/50 p-1.5 rounded-md">
-                                  <AlertCircle size={12} className="shrink-0" />
-                                  <span>Low confidence — {q.consensusNote}</span>
-                                </div>
-                              )}
-                              {q.lostMarksReason && (
-                                 <p className="text-[10px] text-red-500 italic"><AlertCircle size={10} className="inline mr-1" /> {q.lostMarksReason}</p>
-                              )}
-                           </div>
-                        </td>
+                  {[...(result?.questions || [])]
+                     .sort((a: any, b: any) =>
+                        (a.questionNumber || '').localeCompare(b.questionNumber || '', undefined, { numeric: true })
+                     )
+                     .map((q: any) => (
+                      <tr key={q.id} className="group hover:bg-bg/10 transition-colors align-top">
+                         <td className="px-8 py-5">
+                            <div className={cn(
+                               "w-8 h-8 rounded-lg flex items-center justify-center font-bold text-xs",
+                               q.status === 'CORRECT' ? "bg-green-100 text-green-700" :
+                               q.status === 'PARTIAL' ? "bg-gold-pale text-gold" : "bg-red-100 text-red-700"
+                            )}>
+                               {q.questionNumber}
+                            </div>
+                         </td>
+                         <td className="px-8 py-5">
+                            <div className="space-y-3">
+                               <div>
+                                  <span className="inline-block text-[11px] font-medium text-slate-500 bg-slate-100 px-2.5 py-0.5 rounded-full border border-slate-200 mb-1.5">
+                                     {q.topic}
+                                  </span>
+                                  {/* 1. Extracted Question Text */}
+                                  <p className="text-sm font-semibold text-navy leading-relaxed">
+                                     {q.questionText || 'Question text not available'}
+                                  </p>
+                               </div>
+
+                               {/* 2. Student's Answer */}
+                               <div className="bg-white/80 rounded-xl p-3 border border-slate-200/60 shadow-sm">
+                                  <p className="text-[11px] font-semibold text-slate-400 uppercase tracking-wide mb-1.5 flex items-center gap-1.5">
+                                     <span className="w-4 h-4 bg-navy/10 rounded-full flex items-center justify-center text-navy text-[9px] font-bold">S</span>
+                                     Student's Answer
+                                  </p>
+                                  <p className="text-xs text-slate-700 leading-relaxed whitespace-pre-line">
+                                     {q.studentAnswer && q.studentAnswer.trim().length > 0
+                                        ? q.studentAnswer
+                                        : <span className="text-slate-400 italic">No answer provided</span>
+                                     }
+                                  </p>
+                               </div>
+
+                               {/* 3. Expected Answer / Mark Scheme (collapsible) */}
+                               {q.expectedAnswer && (
+                                  <details className="bg-slate-50/70 rounded-xl border border-slate-200/60 shadow-sm text-xs group/details">
+                                     <summary className="px-3 py-2 text-[11px] font-semibold text-slate-500 uppercase tracking-wide cursor-pointer list-none flex items-center gap-1.5 hover:text-navy transition-colors">
+                                        <span className="w-4 h-4 bg-green-100 rounded-full flex items-center justify-center text-green-600 text-[9px] font-bold">✓</span>
+                                        Expected Answer / Mark Scheme
+                                        <span className="ml-auto text-slate-400 text-[10px]">▼</span>
+                                     </summary>
+                                     <div className="px-3 pb-2.5 pt-1 border-t border-slate-100">
+                                        <p className="text-xs text-slate-600 leading-relaxed whitespace-pre-line">
+                                           {q.expectedAnswer}
+                                        </p>
+                                     </div>
+                                  </details>
+                               )}
+
+                               {/* AI Feedback Block */}
+                               <div className="bg-white/50 border border-border p-3 rounded-lg text-xs text-text-muted leading-relaxed">
+                                  <div className="flex items-center gap-1.5 text-[11px] font-semibold text-slate-400 uppercase tracking-wide mb-1">
+                                     <Sparkles size={11} className="text-accent" />
+                                     <span>AI Feedback</span>
+                                  </div>
+                                  <p className="text-xs text-slate-600 leading-relaxed">
+                                     {q.aiFeedback || 'No feedback available'}
+                                  </p>
+                                  {q.lostMarksReason && (
+                                     <div className="mt-2 pt-2 border-t border-slate-100">
+                                        <p className="text-[10px] font-semibold text-red-500 mb-0.5">Why marks were lost:</p>
+                                        <p className="text-[10px] text-red-500 italic"><AlertCircle size={10} className="inline mr-1" /> {q.lostMarksReason}</p>
+                                     </div>
+                                  )}
+                                  {q.improvementSuggestion && (
+                                     <div className="mt-2 pt-2 border-t border-slate-100">
+                                        <p className="text-[10px] font-semibold text-blue-500 mb-0.5">How to improve:</p>
+                                        <p className="text-xs text-blue-600 leading-relaxed">{q.improvementSuggestion}</p>
+                                     </div>
+                                  )}
+                               </div>
+
+                               {q.aiConfidence === 'Low' && (
+                                 <div className="mt-1 flex items-center gap-1.5 text-[10px] text-amber-600 font-bold bg-amber-50/50 border border-amber-200/50 p-1.5 rounded-md">
+                                   <AlertCircle size={12} className="shrink-0" />
+                                   <span>Low confidence — {q.consensusNote}</span>
+                                 </div>
+                               )}
+                            </div>
+                         </td>
                         <td className="px-8 py-5">
                            <div className="space-y-1">
                               <p className="text-sm font-bold text-navy">{q.lecturerOverride ?? q.marksAwarded} / {q.marksAvailable}</p>

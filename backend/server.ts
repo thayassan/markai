@@ -4458,7 +4458,13 @@ Log in to MarkAI to review results.`.trim()
 
   app.get('/api/results/:id', authMiddleware, async (req, res) => {
     try {
-      const result = await (prisma as any).studentResult.findUnique({ where: { id: req.params.id }, include: { questions: true, session: true } });
+      const result = await (prisma as any).studentResult.findUnique({
+        where: { id: req.params.id },
+        include: {
+          questions: { orderBy: { questionNumber: 'asc' } },
+          session: true
+        }
+      });
       res.json(result);
     } catch (error: any) {
       logger.error(`Failed to fetch result ${req.params.id}:`, error.message);
@@ -4469,7 +4475,12 @@ Log in to MarkAI to review results.`.trim()
   app.get('/api/results', authMiddleware, async (req, res) => {
     try {
       const { sessionId, studentId } = req.query;
-      const result = await (prisma as any).studentResult.findFirst({ where: { sessionId: sessionId as string, studentId: studentId as string }, include: { questions: true } });
+      const result = await (prisma as any).studentResult.findFirst({
+        where: { sessionId: sessionId as string, studentId: studentId as string },
+        include: {
+          questions: { orderBy: { questionNumber: 'asc' } }
+        }
+      });
       res.json(result);
     } catch (error: any) {
       logger.error('Failed to fetch result by query:', error.message);

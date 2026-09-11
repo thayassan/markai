@@ -1,19 +1,19 @@
 import React, { useState, useMemo, useEffect, useCallback } from 'react';
 import { DashboardLayout } from '@/src/components/DashboardLayout';
-import { 
-  ArrowLeft, Download, CheckCircle2, Mail, Users, 
-  TrendingUp, Award, Search, Sparkles, Filter, 
+import {
+  ArrowLeft, Download, CheckCircle2, Mail, Users,
+  TrendingUp, Award, Search, Sparkles, Filter,
   ChevronRight, AlertCircle, Loader2, Play, RotateCw,
   FileText, Clock, ShieldCheck, Copy, Check, Eye, RotateCcw, Send
 } from 'lucide-react';
 import { Link, useParams } from 'react-router-dom';
 import { motion, AnimatePresence } from 'framer-motion';
 import { useQuery, useMutation, useQueryClient } from '@tanstack/react-query';
-import { 
-  BarChart, Bar, XAxis, YAxis, CartesianGrid, 
-  Tooltip as RechartsTooltip, ResponsiveContainer, 
-  Cell, RadarChart, PolarGrid, PolarAngleAxis, 
-  PolarRadiusAxis, Radar 
+import {
+  BarChart, Bar, XAxis, YAxis, CartesianGrid,
+  Tooltip as RechartsTooltip, ResponsiveContainer,
+  Cell, RadarChart, PolarGrid, PolarAngleAxis,
+  PolarRadiusAxis, Radar
 } from 'recharts';
 import { cn } from '@/src/lib/utils';
 import { safeGetItem } from '../lib/storage';
@@ -152,12 +152,12 @@ const SessionResultsPage = () => {
         method: 'POST',
         body: JSON.stringify({})
       });
-      
+
       if (!res.ok) {
         const errData = await res.json();
         throw new Error(errData.error || 'Failed to start marking');
       }
-      
+
       // Start polling — queries will auto-refetch
     } catch (error: any) {
       setMarkingError(error.message);
@@ -219,7 +219,6 @@ const SessionResultsPage = () => {
   const [moderatorEmail, setModeratorEmail] = useState('');
   const [moderatorNote, setModeratorNote] = useState('');
   const [copiedModerationLink, setCopiedModerationLink] = useState(false);
-  const [isDownloading, setIsDownloading] = useState(false);
 
   const sendModerationMutation = useMutation({
     mutationFn: async () => {
@@ -291,10 +290,9 @@ const SessionResultsPage = () => {
   };
 
   const handleDownloadReports = () => {
-    setIsDownloading(true);
     const token = safeGetItem('markai_token');
+    // Using simple window.open or a link for download
     window.location.href = `/api/sessions/${id}/download-reports?token=${token}`;
-    setTimeout(() => setIsDownloading(false), 2500);
   };
 
   // Detect when marking completes
@@ -312,7 +310,7 @@ const SessionResultsPage = () => {
   // Analytics Computation
   const analytics = useMemo(() => {
     if (!results || results.length === 0) return null;
-    
+
     const grades = ['A*', 'A', 'B', 'C', 'D', 'E', 'F'];
     const gradeData = grades.map(g => ({
       name: g,
@@ -345,8 +343,8 @@ const SessionResultsPage = () => {
 
   const avgScore = Math.round(analytics?.avgScore || 0);
 
-  const filteredResults = results?.filter((r: any) => 
-    r.studentId.toLowerCase().includes(searchTerm.toLowerCase()) || 
+  const filteredResults = results?.filter((r: any) =>
+    r.studentId.toLowerCase().includes(searchTerm.toLowerCase()) ||
     r.studentName?.toLowerCase().includes(searchTerm.toLowerCase())
   ) || [];
 
@@ -382,17 +380,17 @@ const SessionResultsPage = () => {
         <Link to="/lecturer/sessions" className="btn-ghost text-xs flex items-center gap-2 mb-6">
           <ArrowLeft size={16} /> Back to Sessions
         </Link>
-        
+
         <div className="flex flex-col md:flex-row justify-between items-start md:items-end gap-6">
           <div className="space-y-2">
             <div className="flex items-center gap-3">
               <h1 className="text-3xl font-serif font-bold text-navy">{session?.name}</h1>
               <span className={cn(
                 "badge",
-                session?.status === 'COMPLETE' || session?.status === 'REVIEW_REQUIRED' ? "bg-green-100 text-green-700" : 
-                session?.status === 'MARKING' ? "bg-blue-100 text-blue-700" :
-                session?.status === 'ERROR' ? "bg-red-100 text-red-700" :
-                "bg-gold-pale text-gold"
+                session?.status === 'COMPLETE' || session?.status === 'REVIEW_REQUIRED' ? "bg-green-100 text-green-700" :
+                  session?.status === 'MARKING' ? "bg-blue-100 text-blue-700" :
+                    session?.status === 'ERROR' ? "bg-red-100 text-red-700" :
+                      "bg-gold-pale text-gold"
               )}>
                 {session?.status}
               </span>
@@ -418,158 +416,129 @@ const SessionResultsPage = () => {
               <span>{session?.examBoard}</span>
             </div>
           </div>
-          
-          <div className="flex items-center flex-wrap gap-2.5">
-             {hasResults && (
-               <>
-                 <button 
-                   onClick={handleDownloadReports}
-                   disabled={isDownloading}
-                   className="group flex items-center gap-2 px-4 py-2.5 bg-white border border-slate-200 text-slate-700 hover:text-navy hover:border-slate-300 hover:bg-slate-50/80 rounded-xl font-medium text-sm whitespace-nowrap shadow-xs hover:shadow transition-all active:scale-[0.98] disabled:opacity-60"
-                   title="Download all student reports as a ZIP archive"
-                 >
-                   {isDownloading ? (
-                     <Loader2 size={15} className="animate-spin text-navy" />
-                   ) : (
-                     <Download size={15} className="text-slate-500 group-hover:text-navy transition-colors" />
-                   )}
-                   <span>{isDownloading ? 'Preparing ZIP...' : 'Download Reports (ZIP)'}</span>
-                 </button>
 
-                 <button 
-                   onClick={() => emailStudentsMutation.mutate()}
-                   disabled={emailStudentsMutation.isPending}
-                   className="group flex items-center gap-2 px-4 py-2.5 bg-white border border-slate-200 text-slate-700 hover:text-navy hover:border-slate-300 hover:bg-slate-50/80 rounded-xl font-medium text-sm whitespace-nowrap shadow-xs hover:shadow transition-all active:scale-[0.98] disabled:opacity-50 disabled:cursor-not-allowed"
-                   title="Send email notifications and results to students"
-                 >
-                   {emailStudentsMutation.isPending ? (
-                     <Loader2 size={15} className="animate-spin text-navy" />
-                   ) : (
-                     <Mail size={15} className="text-slate-500 group-hover:text-navy transition-colors" />
-                   )}
-                   <span>{emailStudentsMutation.isPending ? 'Sending...' : 'Email Students'}</span>
-                 </button>
-
-                 <button 
-                   onClick={() => approveAllMutation.mutate()}
-                   disabled={approveAllMutation.isPending || session?.status === 'COMPLETE'}
-                   className="flex items-center gap-2 px-4 py-2.5 bg-navy text-white hover:bg-navy/90 rounded-xl font-medium text-sm whitespace-nowrap shadow-xs hover:shadow transition-all active:scale-[0.98] disabled:opacity-50 disabled:cursor-not-allowed"
-                 >
-                   {approveAllMutation.isPending ? (
-                     <Loader2 size={15} className="animate-spin text-accent" />
-                   ) : (
-                     <CheckCircle2 size={15} className="text-accent" />
-                   )}
-                   <span>{session?.status === 'COMPLETE' ? 'All Approved' : 'Approve All Results'}</span>
-                 </button>
-
-                 <button
-                   onClick={() => setShowModerationModal(true)}
-                   className="flex items-center gap-2 px-4 py-2.5 border-2 border-navy text-navy rounded-xl hover:bg-navy hover:text-white transition-all font-medium text-sm whitespace-nowrap shadow-xs active:scale-[0.98]"
-                 >
-                   <Send size={15} />
-                   <span>Send for Moderation</span>
-                 </button>
-               </>
-             )}
-             {isPending && hasAnswerSheets && (
-               <button 
-                 onClick={handleStartMarking} 
-                 disabled={isMarking}
-                 className="flex items-center gap-2 px-5 py-2.5 bg-navy text-white hover:bg-navy/90 rounded-xl font-medium text-sm whitespace-nowrap shadow-xs active:scale-[0.98] disabled:opacity-50"
-               >
-                 {isMarking ? <Loader2 size={15} className="animate-spin text-accent" /> : <Play size={15} className="text-accent" />}
-                 <span>{isMarking ? 'Starting...' : 'Start AI Marking'}</span>
-               </button>
-             )}
-              {session?.status === 'ERROR' && (
-                <button 
-                  onClick={handleRetryMarking} 
-                  disabled={isMarking}
-                  className="flex items-center gap-2 px-5 py-2.5 bg-red-600 text-white hover:bg-red-700 rounded-xl font-medium text-sm whitespace-nowrap shadow-xs active:scale-[0.98] disabled:opacity-50"
+          <div className="flex gap-3">
+            {hasResults && (
+              <>
+                <button
+                  onClick={handleDownloadReports}
+                  className="btn-ghost flex items-center gap-2 text-xs border border-border"
                 >
-                  <RotateCw size={15} className={isMarking ? 'animate-spin' : ''} />
-                  <span>{isMarking ? 'Retrying...' : 'Retry Marking'}</span>
+                  <Download size={14} /> Download Reports (ZIP)
                 </button>
-              )}
+                <button
+                  onClick={() => emailStudentsMutation.mutate()}
+                  disabled={emailStudentsMutation.isPending}
+                  className="btn-ghost flex items-center gap-2 text-xs border border-border"
+                >
+                  {emailStudentsMutation.isPending ? <Loader2 size={14} className="animate-spin" /> : <Mail size={14} />}
+                  {emailStudentsMutation.isPending ? 'Sending...' : 'Email Students'}
+                </button>
+                <button
+                  onClick={() => approveAllMutation.mutate()}
+                  disabled={approveAllMutation.isPending || session?.status === 'COMPLETE'}
+                  className="btn-primary flex items-center gap-2 text-xs"
+                >
+                  {approveAllMutation.isPending ? <Loader2 size={14} className="animate-spin" /> : <CheckCircle2 size={14} />}
+                  {session?.status === 'COMPLETE' ? 'All Approved' : 'Approve All Results'}
+                </button>
+                <button
+                  onClick={() => setShowModerationModal(true)}
+                  className="flex items-center gap-2 px-4 py-2.5 border-2 border-navy text-navy rounded-xl hover:bg-navy hover:text-white transition-all font-medium text-sm"
+                >
+                  <Send size={15} />
+                  Send for Moderation
+                </button>
+              </>
+            )}
+            {isPending && hasAnswerSheets && (
+              <button
+                onClick={handleStartMarking}
+                disabled={isMarking}
+                className="btn-primary flex items-center gap-2 text-xs"
+              >
+                {isMarking ? <Loader2 size={14} className="animate-spin" /> : <Play size={14} />}
+                {isMarking ? 'Starting...' : 'Start AI Marking'}
+              </button>
+            )}
+            {session?.status === 'ERROR' && (
+              <button
+                onClick={handleRetryMarking}
+                disabled={isMarking}
+                className="btn-primary flex items-center gap-2 text-xs bg-red-600 hover:bg-red-700"
+              >
+                <RotateCw size={14} className={isMarking ? 'animate-spin' : ''} />
+                {isMarking ? 'Retrying...' : 'Retry Marking'}
+              </button>
+            )}
           </div>
         </div>
       </div>
 
       {/* Moderation Status Banner */}
-      {session?.moderationStatus && (() => {
-        const isApproved = session.moderationStatus === 'APPROVED' || session.moderationStatus === 'MODERATION_APPROVED';
-        const isReturned = session.moderationStatus === 'RETURNED' || session.moderationStatus === 'MODERATION_RETURNED';
-        const isReview = session.moderationStatus === 'UNDER_REVIEW';
-
-        return (
-          <div className="mb-8 p-5 bg-white rounded-2xl border border-slate-200/80 flex flex-col md:flex-row md:items-center justify-between gap-4 shadow-sm">
-            <div className="flex items-center gap-3.5">
-              <div className={cn(
-                "w-10 h-10 rounded-xl flex items-center justify-center shrink-0",
-                isApproved ? "bg-emerald-100 text-emerald-700" :
-                isReturned ? "bg-red-100 text-red-700" :
-                isReview ? "bg-blue-100 text-blue-700" :
-                "bg-amber-100 text-amber-700"
-              )}>
-                <ShieldCheck size={20} />
-              </div>
-              <div>
-                <div className="flex items-center gap-2">
-                  <h3 className="font-bold text-navy text-sm">External Moderation / Second Marking</h3>
-                  <span className={cn(
-                    "px-2.5 py-0.5 rounded-full text-[10px] font-bold border uppercase tracking-wider",
-                    isApproved ? "bg-emerald-50 text-emerald-700 border-emerald-200" :
-                    isReturned ? "bg-red-50 text-red-700 border-red-200" :
-                    isReview ? "bg-blue-50 text-blue-700 border-blue-200" :
-                    "bg-amber-50 text-amber-700 border-amber-200"
-                  )}>
-                    {isApproved ? 'Moderation Approved' :
-                     isReturned ? 'Returned for Review' :
-                     isReview ? 'Under Review' : 'Awaiting Moderator'}
-                  </span>
-                </div>
-                <p className="text-xs text-text-muted mt-0.5">
-                  Moderator: <strong className="text-navy">{session.moderatorEmail || 'Invited Moderator'}</strong>
-                  {session.moderatorNote && ` • Note: "${session.moderatorNote}"`}
-                </p>
-                {session.moderationFeedback && (
-                  <p className="text-xs text-amber-900 bg-amber-50/80 p-2.5 rounded-xl mt-2 border border-amber-200/60">
-                    <strong>Moderator Feedback:</strong> {session.moderationFeedback}
-                  </p>
-                )}
-              </div>
+      {session?.moderationStatus && (
+        <div className="mb-8 p-5 bg-surface rounded-md border border-border flex flex-col md:flex-row md:items-center justify-between gap-4 shadow-sm">
+          <div className="flex items-center gap-3.5">
+            <div className={cn(
+              "w-10 h-10 rounded-full flex items-center justify-center shrink-0",
+              session.moderationStatus === 'APPROVED' ? "bg-emerald-100 text-emerald-700" :
+                session.moderationStatus === 'RETURNED' ? "bg-amber-100 text-amber-700" :
+                  "bg-blue-100 text-blue-700"
+            )}>
+              <ShieldCheck size={20} />
             </div>
-
-            <div className="flex items-center gap-2.5">
-              {session.moderatorToken && (
-                <button
-                  onClick={() => {
-                    const url = `${window.location.origin}/moderate/${session.moderatorToken}`;
-                    navigator.clipboard.writeText(url);
-                    setCopiedModerationLink(true);
-                    setTimeout(() => setCopiedModerationLink(false), 2500);
-                  }}
-                  className="px-3.5 py-2 bg-white border border-slate-200 text-slate-700 hover:text-navy hover:bg-slate-50 rounded-xl text-xs font-medium flex items-center gap-1.5 transition-all shadow-xs active:scale-[0.98]"
-                >
-                  {copiedModerationLink ? <Check size={13} className="text-emerald-600" /> : <Copy size={13} />}
-                  <span>{copiedModerationLink ? 'Copied Link!' : 'Copy Moderator Link'}</span>
-                </button>
+            <div>
+              <div className="flex items-center gap-2">
+                <h3 className="font-bold text-navy text-sm">External Moderation / Second Marking</h3>
+                <span className={cn(
+                  "badge text-[10px] px-2 py-0.5 font-bold",
+                  session.moderationStatus === 'APPROVED' ? "bg-emerald-100 text-emerald-800" :
+                    session.moderationStatus === 'RETURNED' ? "bg-amber-100 text-amber-800" :
+                      "bg-blue-100 text-blue-800"
+                )}>
+                  {session.moderationStatus}
+                </span>
+              </div>
+              <p className="text-xs text-text-muted mt-0.5">
+                Moderator: <strong>{session.moderatorEmail || 'Invited Moderator'}</strong>
+                {session.moderatorNote && ` • Note: "${session.moderatorNote}"`}
+              </p>
+              {session.moderationFeedback && (
+                <p className="text-xs text-amber-900 bg-amber-50 p-2.5 rounded mt-2 border border-amber-200">
+                  <strong>Moderator Feedback:</strong> {session.moderationFeedback}
+                </p>
               )}
-              <button
-                onClick={() => setShowModerationModal(true)}
-                className="px-3.5 py-2 bg-white border border-slate-200 text-slate-700 hover:text-navy hover:bg-slate-50 rounded-xl text-xs font-medium transition-all shadow-xs active:scale-[0.98]"
-              >
-                {isApproved ? 'View Details' : 'Resend / Update'}
-              </button>
             </div>
           </div>
-        );
-      })()}
+
+          <div className="flex items-center gap-2">
+            {session.moderatorToken && (
+              <button
+                onClick={() => {
+                  const url = `${window.location.origin}/moderate/${session.moderatorToken}`;
+                  navigator.clipboard.writeText(url);
+                  setCopiedModerationLink(true);
+                  setTimeout(() => setCopiedModerationLink(false), 2500);
+                }}
+                className="btn-ghost border border-border text-xs flex items-center gap-1.5"
+              >
+                {copiedModerationLink ? <Check size={13} className="text-emerald-600" /> : <Copy size={13} />}
+                {copiedModerationLink ? 'Copied Link!' : 'Copy Moderator Link'}
+              </button>
+            )}
+            <button
+              onClick={() => setShowModerationModal(true)}
+              className="btn-ghost border border-border text-xs"
+            >
+              {session.moderationStatus === 'APPROVED' ? 'View Details' : 'Resend / Update'}
+            </button>
+          </div>
+        </div>
+      )}
 
       {/* Marking Progress Banner */}
       {isCurrentlyMarking && (
-        <motion.div 
+        <motion.div
           initial={{ opacity: 0, y: -10 }}
           animate={{ opacity: 1, y: 0 }}
           className="card p-6 mb-8 border-2 border-blue-200 bg-blue-50/50"
@@ -581,7 +550,7 @@ const SessionResultsPage = () => {
             <div className="flex-1">
               <h3 className="text-sm font-bold text-navy">AI Marking in Progress</h3>
               <p className="text-xs text-text-muted mt-1">
-                {markingProgress?.currentStudentId 
+                {markingProgress?.currentStudentId
                   ? `Currently marking: ${markingProgress.currentStudentName || markingProgress.currentStudentId}`
                   : 'Initializing marking pipeline...'
                 }
@@ -593,7 +562,7 @@ const SessionResultsPage = () => {
                     <span>{markingProgress.estimatedSecondsRemaining ? `~${Math.ceil(markingProgress.estimatedSecondsRemaining / 60)} min remaining` : ''}</span>
                   </div>
                   <div className="h-2 bg-blue-100 rounded-full overflow-hidden">
-                    <motion.div 
+                    <motion.div
                       initial={{ width: 0 }}
                       animate={{ width: `${((markingProgress.completed || 0) / (markingProgress.total || 1)) * 100}%` }}
                       className="h-full bg-blue-500 rounded-full"
@@ -608,7 +577,7 @@ const SessionResultsPage = () => {
 
       {/* Error Banner */}
       {markingError && (
-        <motion.div 
+        <motion.div
           initial={{ opacity: 0, y: -10 }}
           animate={{ opacity: 1, y: 0 }}
           className="card p-6 mb-8 border-2 border-red-200 bg-red-50/50"
@@ -625,7 +594,7 @@ const SessionResultsPage = () => {
 
       {/* Session Server Error Banner */}
       {session?.status === 'ERROR' && (
-        <motion.div 
+        <motion.div
           initial={{ opacity: 0, y: -10 }}
           animate={{ opacity: 1, y: 0 }}
           className="card p-6 mb-8 border-2 border-red-200 bg-red-50/50"
@@ -651,9 +620,9 @@ const SessionResultsPage = () => {
           { label: 'Highest Score', value: `${Math.round(analytics?.highest || 0)}%`, icon: Award, color: 'gold' },
         ].map((stat, i) => (
           <div key={i} className="card p-6">
-            <div className={cn("w-8 h-8 rounded-lg flex items-center justify-center mb-3", 
-              stat.color === 'navy' ? "bg-navy/10 text-navy" : 
-              stat.color === 'accent' ? "bg-accent/10 text-accent" : "bg-gold/10 text-gold"
+            <div className={cn("w-8 h-8 rounded-lg flex items-center justify-center mb-3",
+              stat.color === 'navy' ? "bg-navy/10 text-navy" :
+                stat.color === 'accent' ? "bg-accent/10 text-accent" : "bg-gold/10 text-gold"
             )}>
               <stat.icon size={16} />
             </div>
@@ -673,10 +642,10 @@ const SessionResultsPage = () => {
                 <ResponsiveContainer width="100%" height="100%">
                   <BarChart data={analytics.gradeData}>
                     <CartesianGrid strokeDasharray="3 3" vertical={false} stroke="#E2E8F0" />
-                    <XAxis 
-                      dataKey="name" 
-                      axisLine={false} 
-                      tickLine={false} 
+                    <XAxis
+                      dataKey="name"
+                      axisLine={false}
+                      tickLine={false}
                       tick={{ fill: '#64748B', fontSize: 12, fontWeight: 700 }}
                     />
                     <YAxis hide />
@@ -701,103 +670,103 @@ const SessionResultsPage = () => {
 
         {/* Topic Radar */}
         <div className="card p-8 bg-navy text-white overflow-hidden relative">
-           <div className="absolute top-0 right-0 w-32 h-32 bg-accent/20 rounded-full blur-3xl -mr-16 -mt-16" />
-           <h3 className="text-sm font-bold uppercase tracking-[0.2em] border-b border-white/10 pb-4 mb-4">Topic Performance</h3>
-           <div>
-             {analytics?.topicData && analytics.topicData.length >= 3 ? (
-               <div style={{ width: '100%', height: 300 }}>
-                 <ResponsiveContainer width="100%" height="100%">
-                   <RadarChart cx="50%" cy="50%" outerRadius="80%" data={analytics.topicData}>
-                     <PolarGrid stroke="rgba(255,255,255,0.1)" />
-                     <PolarAngleAxis dataKey="subject" tick={{ fill: 'rgba(255,255,255,0.5)', fontSize: 10 }} />
-                     <Radar
-                       name="Avg Score"
-                       dataKey="A"
-                       stroke="#2ECC9A"
-                       fill="#2ECC9A"
-                       fillOpacity={0.6}
-                     />
-                   </RadarChart>
-                 </ResponsiveContainer>
-               </div>
-             ) : (
-               <div className="h-[280px] flex items-center justify-center opacity-40 text-xs italic text-white/60">
-                 Insufficient topic data for Radar overview.
-               </div>
-             )}
-           </div>
+          <div className="absolute top-0 right-0 w-32 h-32 bg-accent/20 rounded-full blur-3xl -mr-16 -mt-16" />
+          <h3 className="text-sm font-bold uppercase tracking-[0.2em] border-b border-white/10 pb-4 mb-4">Topic Performance</h3>
+          <div>
+            {analytics?.topicData && analytics.topicData.length >= 3 ? (
+              <div style={{ width: '100%', height: 300 }}>
+                <ResponsiveContainer width="100%" height="100%">
+                  <RadarChart cx="50%" cy="50%" outerRadius="80%" data={analytics.topicData}>
+                    <PolarGrid stroke="rgba(255,255,255,0.1)" />
+                    <PolarAngleAxis dataKey="subject" tick={{ fill: 'rgba(255,255,255,0.5)', fontSize: 10 }} />
+                    <Radar
+                      name="Avg Score"
+                      dataKey="A"
+                      stroke="#2ECC9A"
+                      fill="#2ECC9A"
+                      fillOpacity={0.6}
+                    />
+                  </RadarChart>
+                </ResponsiveContainer>
+              </div>
+            ) : (
+              <div className="h-[280px] flex items-center justify-center opacity-40 text-xs italic text-white/60">
+                Insufficient topic data for Radar overview.
+              </div>
+            )}
+          </div>
         </div>
       </div>
 
       <div className="grid grid-cols-1 lg:grid-cols-3 gap-8">
         {/* Results Table */}
         <div className="lg:col-span-2 space-y-6">
-           <div className="flex justify-between items-center">
-             <h2 className="text-xl font-serif font-bold text-navy">Detailed Results</h2>
-             <div className="relative w-64">
-               <Search className="absolute left-3 top-1/2 -translate-y-1/2 text-text-muted" size={16} />
-               <input 
-                 type="text" 
-                 placeholder="Search student ID or name..." 
-                 className="input pl-10" 
-                 value={searchTerm}
-                 onChange={e => setSearchTerm(e.target.value)}
-               />
-             </div>
-           </div>
+          <div className="flex justify-between items-center">
+            <h2 className="text-xl font-serif font-bold text-navy">Detailed Results</h2>
+            <div className="relative w-64">
+              <Search className="absolute left-3 top-1/2 -translate-y-1/2 text-text-muted" size={16} />
+              <input
+                type="text"
+                placeholder="Search student ID or name..."
+                className="input pl-10"
+                value={searchTerm}
+                onChange={e => setSearchTerm(e.target.value)}
+              />
+            </div>
+          </div>
 
-           <div className="card overflow-hidden">
-             <table className="w-full text-left">
-               <thead>
-                 <tr className="bg-bg text-[10px] font-bold uppercase tracking-[0.2em] text-text-muted">
-                   <th className="px-8 py-5">Student ID</th>
-                   <th className="px-8 py-5">Student Name</th>
-                   <th className="px-8 py-5">Score</th>
-                   <th className="px-8 py-5">Status</th>
-                   <th className="px-8 py-5 text-right">Action</th>
-                 </tr>
-               </thead>
-               <tbody className="divide-y divide-border">
-                 {resultsLoading ? (
-                    <tr><td colSpan={5} className="px-8 py-10 text-center"><Loader2 className="animate-spin inline-block" /></td></tr>
-                 ) : hasResults ? (
-                   /* Show actual results */
-                   filteredResults.map((res: any) => (
+          <div className="card overflow-hidden">
+            <table className="w-full text-left">
+              <thead>
+                <tr className="bg-bg text-[10px] font-bold uppercase tracking-[0.2em] text-text-muted">
+                  <th className="px-8 py-5">Student ID</th>
+                  <th className="px-8 py-5">Student Name</th>
+                  <th className="px-8 py-5">Score</th>
+                  <th className="px-8 py-5">Status</th>
+                  <th className="px-8 py-5 text-right">Action</th>
+                </tr>
+              </thead>
+              <tbody className="divide-y divide-border">
+                {resultsLoading ? (
+                  <tr><td colSpan={5} className="px-8 py-10 text-center"><Loader2 className="animate-spin inline-block" /></td></tr>
+                ) : hasResults ? (
+                  /* Show actual results */
+                  filteredResults.map((res: any) => (
                     <tr key={res.id} className="hover:bg-bg/10 transition-colors group">
                       <td className="px-8 py-5 font-bold text-navy">{res.studentId}</td>
                       <td className="px-8 py-5 text-sm text-text-muted">{res.studentName || '---'}</td>
                       <td className="px-8 py-5">
-                         <div className="flex flex-col">
-                            <span className="text-sm font-bold text-navy">{res.percentage}%</span>
-                            <span className="text-[10px] text-text-muted">{res.totalMarks}/{res.maxMarks} • {res.grade}</span>
-                         </div>
+                        <div className="flex flex-col">
+                          <span className="text-sm font-bold text-navy">{res.percentage}%</span>
+                          <span className="text-[10px] text-text-muted">{res.totalMarks}/{res.maxMarks} • {res.grade}</span>
+                        </div>
                       </td>
                       <td className="px-8 py-5">
-                         <div className="flex items-center gap-2">
-                           {res.reviewed ? (
-                             <span className="flex items-center gap-1 text-[10px] font-bold text-green-600 uppercase">
-                               <CheckCircle2 size={12} /> Reviewed
-                             </span>
-                           ) : (
-                             <span className="flex items-center gap-1 text-[10px] font-bold text-gold uppercase">
-                               <AlertCircle size={12} /> Pending Review
-                             </span>
-                           )}
-                         </div>
+                        <div className="flex items-center gap-2">
+                          {res.reviewed ? (
+                            <span className="flex items-center gap-1 text-[10px] font-bold text-green-600 uppercase">
+                              <CheckCircle2 size={12} /> Reviewed
+                            </span>
+                          ) : (
+                            <span className="flex items-center gap-1 text-[10px] font-bold text-gold uppercase">
+                              <AlertCircle size={12} /> Pending Review
+                            </span>
+                          )}
+                        </div>
                       </td>
                       <td className="px-8 py-5 text-right">
-                         <Link to={`/lecturer/sessions/${id}/students/${res.studentId}`} className="btn-ghost py-1.5 px-3 text-[10px] border border-border hover:bg-white">
-                           View Detail
-                         </Link>
+                        <Link to={`/lecturer/sessions/${id}/students/${res.studentId}`} className="btn-ghost py-1.5 px-3 text-[10px] border border-border hover:bg-white">
+                          View Detail
+                        </Link>
                       </td>
                     </tr>
-                   ))
-                 ) : hasAnswerSheets ? (
-                   /* Show answer sheets when no results yet */
-                   answerSheets.filter((s: any) => 
-                     s.studentId.toLowerCase().includes(searchTerm.toLowerCase()) ||
-                     (s.studentName || '').toLowerCase().includes(searchTerm.toLowerCase())
-                   ).map((sheet: any) => (
+                  ))
+                ) : hasAnswerSheets ? (
+                  /* Show answer sheets when no results yet */
+                  answerSheets.filter((s: any) =>
+                    s.studentId.toLowerCase().includes(searchTerm.toLowerCase()) ||
+                    (s.studentName || '').toLowerCase().includes(searchTerm.toLowerCase())
+                  ).map((sheet: any) => (
                     <tr key={sheet.id} className="hover:bg-bg/10 transition-colors">
                       <td className="px-8 py-5 font-bold text-navy">{sheet.studentId}</td>
                       <td className="px-8 py-5 text-sm text-text-muted">{sheet.studentName || '---'}</td>
@@ -808,14 +777,14 @@ const SessionResultsPage = () => {
                         <span className={cn(
                           "flex items-center gap-1 text-[10px] font-bold uppercase",
                           sheet.status === 'COMPLETE' ? "text-green-600" :
-                          sheet.status === 'ERROR' ? "text-red-500" :
-                          sheet.status === 'MARKING' ? "text-blue-600" :
-                          "text-gold"
+                            sheet.status === 'ERROR' ? "text-red-500" :
+                              sheet.status === 'MARKING' ? "text-blue-600" :
+                                "text-gold"
                         )}>
-                          {sheet.status === 'COMPLETE' ? <CheckCircle2 size={12} /> : 
-                           sheet.status === 'MARKING' ? <Loader2 size={12} className="animate-spin" /> :
-                           sheet.status === 'ERROR' ? <AlertCircle size={12} /> :
-                           <Clock size={12} />
+                          {sheet.status === 'COMPLETE' ? <CheckCircle2 size={12} /> :
+                            sheet.status === 'MARKING' ? <Loader2 size={12} className="animate-spin" /> :
+                              sheet.status === 'ERROR' ? <AlertCircle size={12} /> :
+                                <Clock size={12} />
                           }
                           {sheet.status === 'PENDING' ? 'Awaiting Marking' : sheet.status}
                         </span>
@@ -826,91 +795,91 @@ const SessionResultsPage = () => {
                         </span>
                       </td>
                     </tr>
-                   ))
-                 ) : (
-                   <tr>
-                     <td colSpan={5} className="px-8 py-16 text-center">
-                       <div className="space-y-3">
-                         <FileText size={32} className="mx-auto text-text-muted opacity-30" />
-                         <p className="text-sm font-bold text-navy">No Students Found</p>
-                         <p className="text-xs text-text-muted">No answer sheets have been uploaded for this session.</p>
-                         <Link to="/lecturer/sessions/new" className="btn-primary inline-flex items-center gap-2 text-xs mt-2">
-                           Create New Session
-                         </Link>
-                       </div>
-                     </td>
-                   </tr>
-                 )}
-               </tbody>
-             </table>
-           </div>
+                  ))
+                ) : (
+                  <tr>
+                    <td colSpan={5} className="px-8 py-16 text-center">
+                      <div className="space-y-3">
+                        <FileText size={32} className="mx-auto text-text-muted opacity-30" />
+                        <p className="text-sm font-bold text-navy">No Students Found</p>
+                        <p className="text-xs text-text-muted">No answer sheets have been uploaded for this session.</p>
+                        <Link to="/lecturer/sessions/new" className="btn-primary inline-flex items-center gap-2 text-xs mt-2">
+                          Create New Session
+                        </Link>
+                      </div>
+                    </td>
+                  </tr>
+                )}
+              </tbody>
+            </table>
+          </div>
         </div>
 
         {/* AI Insights Sidebar */}
         <div className="space-y-6">
-           <div className="flex items-center gap-2">
-             <div className="w-10 h-10 rounded-xl bg-accent/10 text-accent flex items-center justify-center">
-               <Sparkles size={20} />
-             </div>
-             <h2 className="text-xl font-serif font-bold text-navy">Class Insights</h2>
-           </div>
+          <div className="flex items-center gap-2">
+            <div className="w-10 h-10 rounded-xl bg-accent/10 text-accent flex items-center justify-center">
+              <Sparkles size={20} />
+            </div>
+            <h2 className="text-xl font-serif font-bold text-navy">Class Insights</h2>
+          </div>
 
-           <div className="card p-8 bg-bg/50 border-2 border-accent/10 relative overflow-hidden">
-              {hasResults ? (
-                insightsLoading ? (
-                  <div className="py-20 text-center space-y-4">
-                    <Loader2 className="animate-spin mx-auto text-accent" size={32} />
-                    <p className="text-xs font-bold text-navy uppercase tracking-widest">Generating AI Insights...</p>
-                  </div>
-                ) : (
-                  <div className="space-y-6">
-                     {aiInsights ? (
-                       <div className="whitespace-pre-wrap text-sm text-navy leading-relaxed">
-                         {aiInsights}
-                       </div>
-                     ) : (
-                       <p className="text-xs text-text-muted text-center py-4">
-                         {insightsFallback
-                           ? 'AI insights temporarily unavailable.'
-                           : 'Generating insights...'}
-                       </p>
-                     )}
-                     <button 
-                       onClick={() => startInsights()} 
-                       disabled={insightsLoading}
-                       className="btn-ghost w-full py-2 text-[10px] uppercase font-bold tracking-widest border border-border"
-                     >
-                       Regenerate Analysis
-                     </button>
-                  </div>
-                )
-              ) : (
-                <div className="py-12 text-center space-y-3">
-                  <Sparkles size={32} className="mx-auto text-text-muted opacity-30" />
-                  <p className="text-xs font-bold text-navy">Insights will appear after marking</p>
-                  <p className="text-[10px] text-text-muted">AI will analyze student performance once results are available.</p>
+          <div className="card p-8 bg-bg/50 border-2 border-accent/10 relative overflow-hidden">
+            {hasResults ? (
+              insightsLoading ? (
+                <div className="py-20 text-center space-y-4">
+                  <Loader2 className="animate-spin mx-auto text-accent" size={32} />
+                  <p className="text-xs font-bold text-navy uppercase tracking-widest">Generating AI Insights...</p>
                 </div>
-              )}
-           </div>
-
-           <div className="card p-6 border-l-4 border-gold bg-gold-pale/20">
-              <div className="flex gap-4">
-                 <AlertCircle className="text-gold shrink-0" size={20} />
-                 <div className="space-y-2">
-                    <p className="text-xs font-bold text-navy">Attention Required</p>
-                    <p className="text-[10px] text-text-muted leading-relaxed">
-                      {hasResults 
-                        ? `${results?.filter((r: any) => r.percentage < 40).length || 0} students scored below the pass threshold. Consider a review session for the topics: ${[...(analytics?.topicData || [])].sort((a: any,b: any) => a.A - b.A)[0]?.subject || 'N/A'}.`
-                        : isPending 
-                          ? `${answerSheets?.length || 0} answer sheet(s) uploaded. Click "Start AI Marking" to begin the evaluation process.`
-                          : isCurrentlyMarking 
-                            ? 'Marking is in progress. Results will appear automatically.'
-                            : 'No data available yet.'
-                      }
+              ) : (
+                <div className="space-y-6">
+                  {aiInsights ? (
+                    <div className="whitespace-pre-wrap text-sm text-navy leading-relaxed">
+                      {aiInsights}
+                    </div>
+                  ) : (
+                    <p className="text-xs text-text-muted text-center py-4">
+                      {insightsFallback
+                        ? 'AI insights temporarily unavailable.'
+                        : 'Generating insights...'}
                     </p>
-                 </div>
+                  )}
+                  <button
+                    onClick={() => startInsights()}
+                    disabled={insightsLoading}
+                    className="btn-ghost w-full py-2 text-[10px] uppercase font-bold tracking-widest border border-border"
+                  >
+                    Regenerate Analysis
+                  </button>
+                </div>
+              )
+            ) : (
+              <div className="py-12 text-center space-y-3">
+                <Sparkles size={32} className="mx-auto text-text-muted opacity-30" />
+                <p className="text-xs font-bold text-navy">Insights will appear after marking</p>
+                <p className="text-[10px] text-text-muted">AI will analyze student performance once results are available.</p>
               </div>
-           </div>
+            )}
+          </div>
+
+          <div className="card p-6 border-l-4 border-gold bg-gold-pale/20">
+            <div className="flex gap-4">
+              <AlertCircle className="text-gold shrink-0" size={20} />
+              <div className="space-y-2">
+                <p className="text-xs font-bold text-navy">Attention Required</p>
+                <p className="text-[10px] text-text-muted leading-relaxed">
+                  {hasResults
+                    ? `${results?.filter((r: any) => r.percentage < 40).length || 0} students scored below the pass threshold. Consider a review session for the topics: ${[...(analytics?.topicData || [])].sort((a: any, b: any) => a.A - b.A)[0]?.subject || 'N/A'}.`
+                    : isPending
+                      ? `${answerSheets?.length || 0} answer sheet(s) uploaded. Click "Start AI Marking" to begin the evaluation process.`
+                      : isCurrentlyMarking
+                        ? 'Marking is in progress. Results will appear automatically.'
+                        : 'No data available yet.'
+                  }
+                </p>
+              </div>
+            </div>
+          </div>
         </div>
       </div>
 
