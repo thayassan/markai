@@ -1378,16 +1378,21 @@ const NewSessionPage = () => {
                            {studentSheets.filter(s => s.file).length} Files Ready
                          </span>
                          <button 
-                            onClick={() => {
-                              studentSheets.forEach((s, i) => {
-                                if (s.file && !s.uploaded && !s.uploading) {
-                                  handleStudentFileUpload(s.file, i);
+                            onClick={async () => {
+                              const pending = studentSheets
+                                .map((s, i) => ({ s, i }))
+                                .filter(({ s }) => s.file && !s.uploaded && !s.uploading);
+                              for (const { s, i } of pending) {
+                                if (s.file) {
+                                  await handleStudentFileUpload(s.file, i);
                                 }
-                              });
+                              }
                             }}
-                            className="btn-accent px-4 py-2 text-[10px] cursor-pointer"
+                            disabled={studentSheets.some(s => s.uploading)}
+                            className="btn-accent px-4 py-2 text-[10px] cursor-pointer disabled:opacity-50 disabled:cursor-not-allowed flex items-center gap-1.5"
                           >
-                            Upload All
+                            {studentSheets.some(s => s.uploading) && <Loader2 size={12} className="animate-spin" />}
+                            {studentSheets.some(s => s.uploading) ? 'Uploading...' : 'Upload All'}
                          </button>
                        </div>
                        <table className="w-full text-left">
@@ -1412,7 +1417,13 @@ const NewSessionPage = () => {
                                        <span className="text-xs font-medium text-navy truncate max-w-[200px]">{s.file?.name}</span>
                                        {s.studentId && <span className="px-1.5 py-0.5 bg-green-100 text-green-700 rounded text-[8px] font-bold shrink-0">Auto-matched</span>}
                                      </div>
-                                     {s.uploaded && (
+                                     {s.uploading && (
+                                       <div className="flex items-center gap-2 text-xs text-slate-500 mt-1 ml-5.5">
+                                         <Loader2 size={14} className="animate-spin text-accent shrink-0" />
+                                         <span>{s.uploadStatus || 'Processing...'}</span>
+                                       </div>
+                                     )}
+                                     {s.uploaded && !s.uploading && (
                                        <div className="flex items-center gap-2 mt-1 ml-5.5">
                                          <span className={cn(
                                            "px-1.5 py-0.5 rounded text-[8px] font-bold uppercase shrink-0",
@@ -1429,6 +1440,26 @@ const NewSessionPage = () => {
                                        </div>
                                      )}
                                    </div>
+                                   {s.uploadFailed && (
+                                     <div className="mt-2">
+                                       <StudentUploadFailureBox
+                                         errorMessage={s.errorMessage}
+                                         retryAvailableAt={s.retryAvailableAt}
+                                         manualEntryOpen={s.manualEntryOpen}
+                                         extractedText={s.extractedText}
+                                         onRetry={() => retryUpload(idx)}
+                                         onToggleManualEntry={() =>
+                                           setStudentSheets(prev =>
+                                             prev.map((item, i) => i === idx
+                                               ? { ...item, manualEntryOpen: !item.manualEntryOpen }
+                                               : item
+                                             )
+                                           )
+                                         }
+                                         onUpdateText={(text) => updateStudentText(idx, text)}
+                                       />
+                                     </div>
+                                   )}
                                  </td>
                                  <td className="px-6 py-4">
                                    <input 
