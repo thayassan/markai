@@ -3,7 +3,7 @@ import { DashboardLayout } from '@/src/components/DashboardLayout';
 import { 
   Upload, FileText, Check, ArrowRight, X, Zap, 
   Loader2, Plus, Trash2, LayoutGrid, Users,
-  CheckCircle, CheckCircle2, AlertCircle, AlertTriangle, TrendingUp, Target, Award, Calendar, ChevronRight, ArrowUpRight, BarChart2,
+  CheckCircle, CheckCircle2, AlertCircle, AlertTriangle, TrendingUp, Target, Award, Calendar, ChevronRight, ArrowUpRight,
   Sparkles, BookOpen, Hash, Clock, Layers, Globe
 } from 'lucide-react';
 import { motion, AnimatePresence } from 'motion/react';
@@ -1753,66 +1753,6 @@ const NewSessionPage = () => {
 
               {/* Right Column: Settings */}
               <div className="space-y-6">
-                <div className="card p-6">
-                  <h3 className="text-sm font-bold text-navy uppercase tracking-widest mb-6 pb-4 border-b border-border flex items-center gap-2">
-                    <BarChart2 size={18} className="text-accent" /> Marking Settings
-                  </h3>
-                  
-                  <div className="space-y-8">
-                    <div>
-                      <label className="text-xs font-bold text-navy mb-4 block">Marking Strictness</label>
-                      <div className="space-y-3">
-                        {[
-                          { id: 'Strict', color: 'bg-red-500', desc: 'Follow mark scheme exactly. Only award marks for answers that precisely match criteria.' },
-                          { id: 'Standard', color: 'bg-amber-500', desc: 'Allow minor variations in wording if the correct concept is demonstrated.' },
-                          { id: 'Lenient', color: 'bg-green-500', desc: 'Credit partial understanding and creative approaches showing knowledge.' }
-                        ].map(opt => (
-                          <label 
-                            key={opt.id}
-                            className={cn(
-                              "flex p-3 rounded-xl border-2 transition-all cursor-pointer",
-                              markingStrictness === opt.id ? "border-navy bg-navy/5" : "border-border hover:border-text-muted"
-                            )}
-                          >
-                            <input 
-                              type="radio" 
-                              className="hidden" 
-                              name="strictness" 
-                              checked={markingStrictness === opt.id}
-                              onChange={() => setMarkingStrictness(opt.id)}
-                            />
-                            <div className="flex gap-3">
-                              <div className={cn("w-2 h-2 rounded-full mt-1.5 shrink-0", opt.color)} />
-                              <div>
-                                <p className="text-xs font-bold text-navy">{opt.id}</p>
-                                <p className="text-[10px] text-text-muted mt-1 leading-relaxed">{opt.desc}</p>
-                              </div>
-                            </div>
-                          </label>
-                        ))}
-                      </div>
-                    </div>
-
-                    <div>
-                      <label className="text-xs font-bold text-navy mb-4 block">AI Feedback Detail</label>
-                      <div className="grid grid-cols-2 gap-4">
-                        {['Detailed', 'Brief'].map(detail => (
-                          <button 
-                            key={detail}
-                            onClick={() => setFeedbackDetail(detail)}
-                            className={cn(
-                              "px-4 py-3 rounded-xl border-2 text-xs font-bold transition-all",
-                              feedbackDetail === detail ? "border-navy bg-navy text-white shadow-lg" : "border-border text-text-muted hover:border-navy"
-                            )}
-                          >
-                            {detail}
-                          </button>
-                        ))}
-                      </div>
-                    </div>
-                  </div>
-                </div>
-
                 <div className="card p-6 bg-navy text-white">
                   <div className="flex justify-between items-start mb-6">
                     <div>
