@@ -2447,16 +2447,44 @@ Do not count the pages sequentially as Q1, Q2, Q3, Q4, Q5, Q6, Q7, Q8. Find the 
       const { page = 1, limit = 10, status, subject, sort = 'createdAt_desc' } = req.query;
       const skip = (Number(page) - 1) * Number(limit);
       const [field, order] = (sort as string).split('_');
+      const userId = (req as any).user?.id || (req as any).userId;
 
-      const where: any = { lecturerId: req.user.id };
+      const where: any = { lecturerId: userId };
       if (status) where.status = status;
       if (subject) where.subject = subject;
 
-      const data = await (prisma as any).markingSession.findMany({
-        where, skip, take: Number(limit),
-        orderBy: { [field]: order as any },
-        include: { _count: { select: { results: true, answerSheets: true } } }
-      });
+      let data;
+      try {
+        data = await (prisma as any).markingSession.findMany({
+          where, skip, take: Number(limit),
+          orderBy: { [field]: order as any },
+          include: { _count: { select: { results: true, answerSheets: true } } }
+        });
+      } catch (innerErr: any) {
+        logger.warn('Standard findMany on /api/sessions failed, using safe select fallback:', innerErr.message);
+        data = await (prisma as any).markingSession.findMany({
+          where, skip, take: Number(limit),
+          orderBy: { [field]: order as any },
+          select: {
+            id: true,
+            name: true,
+            classId: true,
+            lecturerId: true,
+            subject: true,
+            sessionType: true,
+            examBoard: true,
+            courseId: true,
+            paperType: true,
+            questionPdfUrl: true,
+            markSchemePdfUrl: true,
+            status: true,
+            errorMessage: true,
+            totalMaxMarks: true,
+            createdAt: true,
+            _count: { select: { results: true, answerSheets: true } }
+          }
+        });
+      }
       const total = await (prisma as any).markingSession.count({ where });
 
       res.json({ data, total, page: Number(page), totalPages: Math.ceil(total / Number(limit)) });
@@ -2610,9 +2638,41 @@ Do not count the pages sequentially as Q1, Q2, Q3, Q4, Q5, Q6, Q7, Q8. Find the 
 
   app.get('/api/sessions/:id', authMiddleware, async (req, res) => {
     try {
-      const session = await (prisma as any).markingSession.findUnique({
-        where: { id: req.params.id }
-      });
+      let session;
+      try {
+        session = await (prisma as any).markingSession.findUnique({
+          where: { id: req.params.id }
+        });
+      } catch (innerErr: any) {
+        logger.warn(`Standard findUnique on /api/sessions/${req.params.id} failed, using safe select:`, innerErr.message);
+        session = await (prisma as any).markingSession.findUnique({
+          where: { id: req.params.id },
+          select: {
+            id: true,
+            name: true,
+            classId: true,
+            lecturerId: true,
+            subject: true,
+            sessionType: true,
+            examBoard: true,
+            courseId: true,
+            paperType: true,
+            questionPdfUrl: true,
+            markSchemePdfUrl: true,
+            questionTextUrl: true,
+            markSchemeTextUrl: true,
+            parsedQuestions: true,
+            parsedMarkScheme: true,
+            totalMaxMarks: true,
+            parsingVerified: true,
+            markingStrictness: true,
+            feedbackDetail: true,
+            status: true,
+            errorMessage: true,
+            createdAt: true
+          }
+        });
+      }
       if (!session) return res.status(404).json({ error: 'Session not found' });
       res.json(session);
     } catch (error: any) {
