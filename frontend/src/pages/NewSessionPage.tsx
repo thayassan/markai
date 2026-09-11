@@ -1361,7 +1361,7 @@ const NewSessionPage = () => {
                             previewOpen: false
                           };
                         });
-                        setStudentSheets(prev => [...prev, ...newSheets]);
+                        setStudentSheets(prev => [...prev.filter(s => s.file), ...newSheets]);
                       }}
                     />
                     <div className="w-20 h-20 bg-bg rounded-2xl flex items-center justify-center mx-auto mb-6 group-hover:bg-accent/10 transition-colors">
@@ -1371,10 +1371,12 @@ const NewSessionPage = () => {
                     <p className="text-text-muted mt-2">or click to select multiple files (PDF, JPG, PNG)</p>
                   </div>
 
-                  {studentSheets.length > 0 && (
+                  {studentSheets.some(s => s.file) && (
                     <div className="card overflow-hidden">
                        <div className="bg-bg p-4 border-b border-border flex justify-between items-center">
-                         <span className="text-xs font-bold text-navy uppercase tracking-widest">{studentSheets.length} Files Ready</span>
+                         <span className="text-xs font-bold text-navy uppercase tracking-widest">
+                           {studentSheets.filter(s => s.file).length} Files Ready
+                         </span>
                          <button 
                             onClick={() => {
                               studentSheets.forEach((s, i) => {
@@ -1383,7 +1385,7 @@ const NewSessionPage = () => {
                                 }
                               });
                             }}
-                            className="btn-accent px-4 py-2 text-[10px]"
+                            className="btn-accent px-4 py-2 text-[10px] cursor-pointer"
                           >
                             Upload All
                          </button>
@@ -1394,59 +1396,72 @@ const NewSessionPage = () => {
                              <th className="px-6 py-4 text-[10px] uppercase tracking-widest font-bold text-text-muted">Uploaded File</th>
                              <th className="px-6 py-4 text-[10px] uppercase tracking-widest font-bold text-text-muted">Assign Student ID *</th>
                              <th className="px-6 py-4 text-[10px] uppercase tracking-widest font-bold text-text-muted">Student Name</th>
+                             <th className="px-6 py-4 text-[10px] uppercase tracking-widest font-bold text-text-muted text-right">Action</th>
                            </tr>
                          </thead>
                          <tbody>
-                            {studentSheets.map((s, idx) => (
-                              <tr key={idx} className="border-b border-border last:border-0">
-                                <td className="px-6 py-4">
-                                  <div className="flex flex-col">
-                                    <div className="flex items-center gap-2">
-                                      <FileText size={14} className="text-text-muted shrink-0" />
-                                      <span className="text-xs font-medium text-navy truncate max-w-[200px]">{s.file?.name}</span>
-                                      {s.studentId && <span className="px-1.5 py-0.5 bg-green-100 text-green-700 rounded text-[8px] font-bold shrink-0">Auto-matched</span>}
-                                    </div>
-                                    {s.uploaded && (
-                                      <div className="flex items-center gap-2 mt-1 ml-5.5">
-                                        <span className={cn(
-                                          "px-1.5 py-0.5 rounded text-[8px] font-bold uppercase shrink-0",
-                                          s.extractMethod === 'gemini-vision' ? "bg-blue-100 text-blue-600" : "bg-green-100 text-green-600"
-                                        )}>
-                                          {s.extractMethod === 'gemini-vision' ? '🤖 AI OCR' : '📄 Text'}
-                                        </span>
-                                        <button 
-                                          onClick={() => setPreviewIndex(idx)}
-                                          className="text-[8px] font-bold uppercase text-accent hover:underline cursor-pointer"
-                                        >
-                                          ▶ Preview Text
-                                        </button>
-                                      </div>
-                                    )}
-                                  </div>
-                                </td>
-                                <td className="px-6 py-4">
-                                  <input 
-                                    type="text" 
-                                    className={cn(
-                                      "input h-9 text-xs bg-white border-border hover:border-navy/30 focus:border-navy transition-all",
-                                      !s.studentId && s.uploaded && "border-red-300 bg-red-50/30"
-                                    )} 
-                                    placeholder="ID (Required) *"
-                                    value={s.studentId}
-                                    onChange={e => setStudentSheets(prev => prev.map((item, i) => i === idx ? { ...item, studentId: e.target.value } : item))}
-                                  />
-                                </td>
-                                <td className="px-6 py-4">
-                                  <input 
-                                    type="text" 
-                                    className="input h-9 text-xs bg-white border-border hover:border-navy/30 focus:border-navy transition-all" 
-                                    placeholder="Student Name (Optional)"
-                                    value={s.studentName}
-                                    onChange={e => setStudentSheets(prev => prev.map((item, i) => i === idx ? { ...item, studentName: e.target.value } : item))}
-                                  />
-                                </td>
-                              </tr>
-                            ))}
+                            {studentSheets
+                              .map((s, idx) => ({ s, idx }))
+                              .filter(({ s }) => s.file)
+                              .map(({ s, idx }) => (
+                               <tr key={idx} className="border-b border-border last:border-0">
+                                 <td className="px-6 py-4">
+                                   <div className="flex flex-col">
+                                     <div className="flex items-center gap-2">
+                                       <FileText size={14} className="text-text-muted shrink-0" />
+                                       <span className="text-xs font-medium text-navy truncate max-w-[200px]">{s.file?.name}</span>
+                                       {s.studentId && <span className="px-1.5 py-0.5 bg-green-100 text-green-700 rounded text-[8px] font-bold shrink-0">Auto-matched</span>}
+                                     </div>
+                                     {s.uploaded && (
+                                       <div className="flex items-center gap-2 mt-1 ml-5.5">
+                                         <span className={cn(
+                                           "px-1.5 py-0.5 rounded text-[8px] font-bold uppercase shrink-0",
+                                           s.extractMethod === 'gemini-vision' ? "bg-blue-100 text-blue-600" : "bg-green-100 text-green-600"
+                                         )}>
+                                           {s.extractMethod === 'gemini-vision' ? '🤖 AI OCR' : '📄 Text'}
+                                         </span>
+                                         <button 
+                                           onClick={() => setPreviewIndex(idx)}
+                                           className="text-[8px] font-bold uppercase text-accent hover:underline cursor-pointer"
+                                         >
+                                           ▶ Preview Text
+                                         </button>
+                                       </div>
+                                     )}
+                                   </div>
+                                 </td>
+                                 <td className="px-6 py-4">
+                                   <input 
+                                     type="text" 
+                                     className={cn(
+                                       "input h-9 text-xs bg-white border-border hover:border-navy/30 focus:border-navy transition-all",
+                                       !s.studentId && s.uploaded && "border-red-300 bg-red-50/30"
+                                     )} 
+                                     placeholder="ID (Required) *"
+                                     value={s.studentId}
+                                     onChange={e => setStudentSheets(prev => prev.map((item, i) => i === idx ? { ...item, studentId: e.target.value } : item))}
+                                   />
+                                 </td>
+                                 <td className="px-6 py-4">
+                                   <input 
+                                     type="text" 
+                                     className="input h-9 text-xs bg-white border-border hover:border-navy/30 focus:border-navy transition-all" 
+                                     placeholder="Student Name (Optional)"
+                                     value={s.studentName}
+                                     onChange={e => setStudentSheets(prev => prev.map((item, i) => i === idx ? { ...item, studentName: e.target.value } : item))}
+                                   />
+                                 </td>
+                                 <td className="px-6 py-4 text-right">
+                                   <button 
+                                     onClick={() => setStudentSheets(prev => prev.filter((_, i) => i !== idx))}
+                                     className="text-text-muted hover:text-red-500 transition-colors cursor-pointer"
+                                     title="Remove Sheet"
+                                   >
+                                     <Trash2 size={16} />
+                                   </button>
+                                 </td>
+                               </tr>
+                             ))}
                          </tbody>
                        </table>
                     </div>
