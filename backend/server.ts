@@ -4477,6 +4477,29 @@ Log in to MarkAI to review results.`.trim()
     }
   });
 
+  app.get('/api/sessions/:sessionId/students/:studentId', authMiddleware, async (req, res) => {
+    try {
+      const result = await (prisma as any).studentResult.findFirst({
+        where: {
+          sessionId: req.params.sessionId,
+          studentId: req.params.studentId
+        },
+        include: {
+          session: true,
+          questions: {
+            orderBy: { questionNumber: 'asc' }
+          }
+        }
+      });
+
+      if (!result) return res.status(404).json({ error: 'Result not found' });
+      res.json(result);
+    } catch (error: any) {
+      logger.error('Student result error:', error);
+      res.status(500).json({ error: error.message });
+    }
+  });
+
   app.patch('/api/results/:resultId/override', authMiddleware, async (req, res) => {
     try {
       const { questionId, lecturerMark, lecturerNote } = overrideSchema.parse(req.body);

@@ -178,80 +178,148 @@ const StudentResultDetail = () => {
          {/* Detailed Breakdown */}
          <div className="lg:col-span-2 space-y-6">
             <h2 className="text-xl font-serif font-bold text-navy">Question Breakdown</h2>
-            <div className="space-y-4">
-               {result?.questions?.map((q: any) => (
-                  <motion.div 
-                     key={q.id}
-                     initial={{ opacity: 0, y: 10 }}
-                     animate={{ opacity: 1, y: 0 }}
-                     className="card p-6 hover:shadow-lg transition-all border-l-4"
-                     style={{ borderLeftColor: q.status === 'CORRECT' ? '#2ECC9A' : q.status === 'PARTIAL' ? '#F2C94C' : '#FF4D4D' }}
-                  >
-                     <div className="flex justify-between items-start mb-4">
-                        <div>
-                           <p className="text-[10px] font-bold text-text-muted uppercase tracking-widest">Question {q.questionNumber}</p>
-                           <h3 className="text-lg font-bold text-navy mt-1">{q.topic}</h3>
-                        </div>
-                        <div className="text-right space-y-1">
-                           <div className="flex items-center justify-end gap-2">
-                              <p className="text-sm font-bold text-navy">
-                                 {q.lecturerOverride ?? q.marksAwarded} / {q.marksAvailable}
-                              </p>
-                              <span className={cn(
-                                 "text-[10px] font-bold uppercase",
-                                 q.status === 'CORRECT' ? "text-green-600" : q.status === 'PARTIAL' ? "text-gold" : "text-red-500"
-                              )}>
-                                 {q.status}
-                              </span>
-                           </div>
+            <div className="space-y-3">
+              {result?.questions && [...result.questions]
+                .sort((a: any, b: any) => {
+                  // Sort by question number naturally: Q1(a)(i) before Q1(a)(ii) before Q1(b)(i)
+                  return (a.questionNumber || '').localeCompare(b.questionNumber || '', undefined, { numeric: true });
+                })
+                .map((q: any, idx: number) => {
 
-                           {/* Show change badge if mark was modified */}
-                           {q.lastChangedByRole && q.lastChangedByRole !== 'AI' && (
-                              <div className="flex items-center justify-end gap-2 mt-1">
-                                 {getChangeBadge(q)}
-                                 {/* Show original AI mark for comparison */}
-                                 {q.originalAiMark !== null && q.originalAiMark !== undefined && q.originalAiMark !== (q.lecturerOverride ?? q.marksAwarded) && (
-                                    <span className="text-xs text-slate-400 line-through">
-                                       AI: {q.originalAiMark}
-                                    </span>
-                                 )}
-                              </div>
-                           )}
-                        </div>
-                     </div>
+                  const markPercent = q.marksAvailable > 0
+                    ? (q.marksAwarded / q.marksAvailable) * 100
+                    : 0;
 
-                     <div className="space-y-4">
-                        <div className="bg-bg/50 p-4 rounded-xl border border-border">
-                           <div className="flex items-center gap-2 mb-2 opacity-40">
-                              <MessageSquare size={12} />
-                              <span className="text-[10px] font-bold uppercase tracking-widest">AI Feedback</span>
-                           </div>
-                           <p className="text-sm text-navy leading-relaxed">{q.aiFeedback}</p>
+                  const statusColor =
+                    markPercent === 100 ? 'border-green-200 bg-green-50' :
+                    markPercent >= 50   ? 'border-amber-200 bg-amber-50' :
+                                          'border-red-200 bg-red-50';
+
+                  const markColor =
+                    markPercent === 100 ? 'text-green-600 bg-green-100' :
+                    markPercent >= 50   ? 'text-amber-600 bg-amber-100' :
+                                          'text-red-600 bg-red-100';
+
+                  return (
+                    <div
+                      key={q.id}
+                      className={`rounded-xl border p-5 mb-3 ${statusColor}`}
+                    >
+                      {/* Question header row */}
+                      <div className="flex items-start justify-between gap-4 mb-4">
+                        <div className="flex items-start gap-3 flex-1 min-w-0">
+                          {/* Question number badge */}
+                          <div className="flex-shrink-0 w-10 h-10 bg-white border border-slate-200 rounded-xl flex items-center justify-center">
+                            <span className="text-xs font-bold text-navy leading-tight text-center">
+                              {q.questionNumber}
+                            </span>
+                          </div>
+
+                          <div className="flex-1 min-w-0">
+                            {/* Topic tag */}
+                            <span className="inline-block text-xs font-medium text-slate-400 bg-white/70 px-2.5 py-0.5 rounded-full border border-slate-200 mb-2">
+                              {q.topic}
+                            </span>
+
+                            {/* ACTUAL QUESTION TEXT */}
+                            <p className="text-sm font-semibold text-navy leading-relaxed">
+                              {q.questionText || 'Question text not available'}
+                            </p>
+                          </div>
                         </div>
 
-                        {(q.lostMarksReason || q.improvementSuggestion) && (
-                           <div className="p-4 bg-red-50/30 rounded-xl border border-red-100">
-                              <div className="flex items-center gap-2 mb-2 text-red-500">
-                                 <AlertCircle size={12} />
-                                 <span className="text-[10px] font-bold uppercase tracking-widest">How to Improve</span>
-                              </div>
-                              <p className="text-xs text-navy font-medium mb-2">{q.lostMarksReason}</p>
-                              <p className="text-xs text-text-muted italic">Suggestion: {q.improvementSuggestion}</p>
-                           </div>
+                        {/* Mark badge */}
+                        <div className={`flex-shrink-0 px-3 py-1.5 rounded-xl text-sm font-bold ${markColor}`}>
+                          {q.lecturerOverride ?? q.marksAwarded}/{q.marksAvailable}
+                          {q.lecturerOverride !== null && q.lecturerOverride !== undefined && (
+                            <span className="text-xs font-normal ml-1 opacity-70">*</span>
+                          )}
+                        </div>
+                      </div>
+
+                      {/* Student Answer */}
+                      <div className="bg-white/80 rounded-xl p-4 mb-3 border border-white">
+                        <p className="text-xs font-semibold text-slate-400 uppercase tracking-wide mb-2 flex items-center gap-1.5">
+                          <span className="w-4 h-4 bg-navy/10 rounded-full flex items-center justify-center text-navy text-[9px]">S</span>
+                          Student's Answer
+                        </p>
+                        <p className="text-sm text-slate-700 leading-relaxed whitespace-pre-line">
+                          {q.studentAnswer && q.studentAnswer.trim().length > 0
+                            ? q.studentAnswer
+                            : <span className="text-slate-400 italic">No answer provided</span>
+                          }
+                        </p>
+                      </div>
+
+                      {/* Expected Answer (collapsible) */}
+                      {q.expectedAnswer && (
+                        <details className="bg-white/60 rounded-xl border border-white mb-3">
+                          <summary className="px-4 py-2.5 text-xs font-semibold text-slate-500 uppercase tracking-wide cursor-pointer list-none flex items-center gap-1.5 hover:text-navy">
+                            <span className="w-4 h-4 bg-green-100 rounded-full flex items-center justify-center text-green-600 text-[9px]">✓</span>
+                            Expected Answer / Mark Scheme
+                            <span className="ml-auto text-slate-300">▼</span>
+                          </summary>
+                          <div className="px-4 pb-3">
+                            <p className="text-sm text-slate-600 leading-relaxed whitespace-pre-line">
+                              {q.expectedAnswer}
+                            </p>
+                          </div>
+                        </details>
+                      )}
+
+                      {/* AI Feedback */}
+                      <div className="bg-white/60 rounded-xl p-4 border border-white">
+                        <p className="text-xs font-semibold text-slate-400 uppercase tracking-wide mb-2 flex items-center gap-1.5">
+                          <span className="w-4 h-4 bg-accent/20 rounded-full flex items-center justify-center text-accent text-[9px]">AI</span>
+                          AI Feedback
+                        </p>
+                        <p className="text-sm text-slate-600 leading-relaxed">
+                          {q.aiFeedback || 'No feedback available'}
+                        </p>
+
+                        {/* Lost marks reason */}
+                        {q.lostMarksReason && (
+                          <div className="mt-3 pt-3 border-t border-slate-100">
+                            <p className="text-xs font-semibold text-red-500 mb-1">Why marks were lost:</p>
+                            <p className="text-xs text-red-600 leading-relaxed">{q.lostMarksReason}</p>
+                          </div>
                         )}
 
-                        {q.lecturerNote && (
-                           <div className="p-4 bg-navy/5 rounded-xl border border-navy/10">
-                              <div className="flex items-center gap-2 mb-2 text-navy">
-                                 <Users size={12} />
-                                 <span className="text-[10px] font-bold uppercase tracking-widest">Lecturer Note</span>
-                              </div>
-                              <p className="text-xs text-navy italic">"{q.lecturerNote}"</p>
-                           </div>
+                        {/* Improvement suggestion */}
+                        {q.improvementSuggestion && (
+                          <div className="mt-3 pt-3 border-t border-slate-100">
+                            <p className="text-xs font-semibold text-blue-500 mb-1">How to improve:</p>
+                            <p className="text-xs text-blue-600 leading-relaxed">{q.improvementSuggestion}</p>
+                          </div>
                         )}
-                     </div>
-                  </motion.div>
-               ))}
+                      </div>
+
+                      {/* Lecturer override note */}
+                      {q.lecturerNote && (
+                        <div className="mt-3 bg-navy/5 rounded-xl px-4 py-3 border border-navy/10">
+                          <p className="text-xs font-semibold text-navy mb-1 flex items-center gap-1.5">
+                            <UserCheck size={11} />
+                            Lecturer Note
+                          </p>
+                          <p className="text-xs text-navy/70">{q.lecturerNote}</p>
+                        </div>
+                      )}
+
+                      {/* Mark change audit badge */}
+                      {q.lastChangedByName && q.lastChangedByRole !== 'AI' && (
+                        <div className="mt-2 flex items-center gap-1.5">
+                          <span className={`text-xs px-2.5 py-1 rounded-full font-medium ${
+                            q.lastChangedByRole === 'MODERATOR'
+                              ? 'bg-purple-100 text-purple-600'
+                              : 'bg-blue-100 text-blue-600'
+                          }`}>
+                            ✎ Overridden by {q.lastChangedByName} ({q.lastChangedByRole})
+                          </span>
+                        </div>
+                      )}
+                    </div>
+                  );
+                })}
             </div>
 
             {/* Full Audit History Panel */}
