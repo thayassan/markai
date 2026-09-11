@@ -24,6 +24,8 @@ import TermsPage from './pages/TermsPage';
 import CareersPage from './pages/CareersPage';
 import DocsPage from './pages/DocsPage';
 import ModerationPage from './pages/ModerationPage';
+import ContactPage from './pages/ContactPage';
+import HelpPage from './pages/HelpPage';
 import { NotFoundPage } from './pages/ErrorPages';
 import { ErrorBoundary } from './components/ErrorBoundary';
 import { AuthProvider, useAuth } from './context/AuthContext';
@@ -58,7 +60,7 @@ const AppRoutes = () => {
   }, [user, isLoading]);
 
   const userEmail = user?.email;
-  const publicPaths = ['/', '/login', '/register', '/features', '/pricing', '/about', '/privacy', '/terms', '/careers', '/docs'];
+  const publicPaths = ['/', '/login', '/register', '/features', '/pricing', '/about', '/privacy', '/terms', '/careers', '/docs', '/contact', '/help'];
   React.useEffect(() => {
     const isPublic = publicPaths.includes(window.location.pathname) || window.location.pathname.startsWith('/moderate');
     if (!isLoading && !userEmail && !isPublic) {
@@ -97,6 +99,8 @@ const AppRoutes = () => {
         <Route path="/terms" element={<PageTransition><TermsPage /></PageTransition>} />
         <Route path="/careers" element={<PageTransition><CareersPage /></PageTransition>} />
         <Route path="/docs" element={<PageTransition><DocsPage /></PageTransition>} />
+        <Route path="/contact" element={<PageTransition><ContactPage /></PageTransition>} />
+        <Route path="/help" element={<PageTransition><HelpPage /></PageTransition>} />
         <Route path="/moderate/:token" element={<PageTransition><ModerationPage /></PageTransition>} />
         
         {/* Student Routes */}
@@ -153,9 +157,9 @@ const AppRoutes = () => {
         <Route path="/progress" element={user ? <PageTransition><ProgressPage /></PageTransition> : <Navigate to="/login" replace />} />
         <Route path="/settings" element={user ? <PageTransition><SettingsPage /></PageTransition> : <Navigate to="/login" replace />} />
         
-        {/* 404 */}
+        {/* 404 Catch-All */}
         <Route path="/404" element={<PageTransition><NotFoundPage /></PageTransition>} />
-        <Route path="*" element={<Navigate to="/404" replace />} />
+        <Route path="*" element={<PageTransition><NotFoundPage /></PageTransition>} />
       </Routes>
     </AnimatePresence>
   );

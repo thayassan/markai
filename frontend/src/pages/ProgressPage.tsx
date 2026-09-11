@@ -337,23 +337,29 @@ const ProgressPage = () => {
                  </span>
               </div>
            </div>
-           <div style={{ width: '100%', height: 280 }}>
-              <ResponsiveContainer width="100%" height="100%">
-                 <AreaChart data={analytics?.timeline}>
-                    <defs>
-                       <linearGradient id="colorCurve" x1="0" y1="0" x2="0" y2="1">
-                          <stop offset="5%" stopColor="#2ECC9A" stopOpacity={0.2}/>
-                          <stop offset="95%" stopColor="#2ECC9A" stopOpacity={0}/>
-                       </linearGradient>
-                    </defs>
-                    <CartesianGrid strokeDasharray="3 3" vertical={false} stroke="#F1F5F9" />
-                    <XAxis dataKey="name" axisLine={false} tickLine={false} tick={{ fill: '#64748B', fontSize: 10, fontWeight: 700 }} />
-                    <YAxis axisLine={false} tickLine={false} tick={{ fill: '#64748B', fontSize: 10, fontWeight: 700 }} domain={[0, 100]} />
-                    <Tooltip contentStyle={{ borderRadius: '12px', border: 'none', boxShadow: '0 10px 15px -3px rgba(0,0,0,0.1)' }} />
-                    <Area type="monotone" dataKey="score" stroke="#2ECC9A" strokeWidth={3} fill="url(#colorCurve)" />
-                 </AreaChart>
-              </ResponsiveContainer>
-           </div>
+           {analytics?.timeline && analytics.timeline.length > 0 ? (
+              <div style={{ width: '100%', height: 280 }}>
+                 <ResponsiveContainer width="100%" height="100%">
+                    <AreaChart data={analytics.timeline}>
+                       <defs>
+                          <linearGradient id="colorCurve" x1="0" y1="0" x2="0" y2="1">
+                             <stop offset="5%" stopColor="#2ECC9A" stopOpacity={0.2}/>
+                             <stop offset="95%" stopColor="#2ECC9A" stopOpacity={0}/>
+                          </linearGradient>
+                       </defs>
+                       <CartesianGrid strokeDasharray="3 3" vertical={false} stroke="#F1F5F9" />
+                       <XAxis dataKey="name" axisLine={false} tickLine={false} tick={{ fill: '#64748B', fontSize: 10, fontWeight: 700 }} />
+                       <YAxis axisLine={false} tickLine={false} tick={{ fill: '#64748B', fontSize: 10, fontWeight: 700 }} domain={[0, 100]} />
+                       <Tooltip contentStyle={{ borderRadius: '12px', border: 'none', boxShadow: '0 10px 15px -3px rgba(0,0,0,0.1)' }} />
+                       <Area type="monotone" dataKey="score" stroke="#2ECC9A" strokeWidth={3} fill="url(#colorCurve)" />
+                    </AreaChart>
+                 </ResponsiveContainer>
+              </div>
+           ) : (
+              <div className="h-[280px] flex items-center justify-center text-slate-400 text-sm">
+                 No learning curve data yet
+              </div>
+           )}
         </div>
 
         {/* Subject Breakdown */}
@@ -362,20 +368,26 @@ const ProgressPage = () => {
               <h3 className="text-sm font-bold text-navy uppercase tracking-[0.2em]">Subject Strengths</h3>
               <BarChart2 size={16} className="text-text-muted" />
            </div>
-           <div style={{ width: '100%', height: 280 }}>
-              <ResponsiveContainer width="100%" height="100%">
-                 <BarChart data={analytics?.subjects} layout="vertical">
-                    <XAxis type="number" hide domain={[0, 100]} />
-                    <YAxis dataKey="name" type="category" axisLine={false} tickLine={false} tick={{ fill: '#0F172A', fontSize: 10, fontWeight: 700 }} width={80} />
-                    <Tooltip cursor={{ fill: 'transparent' }} />
-                    <Bar dataKey="score" radius={[0, 4, 4, 0]} barSize={20}>
-                       {analytics?.subjects.map((entry: any, index: number) => (
-                          <Cell key={`cell-${index}`} fill={entry.score >= 70 ? '#2ECC9A' : entry.score >= 50 ? '#F2C94C' : '#FF4D4D'} />
-                       ))}
-                    </Bar>
-                 </BarChart>
-              </ResponsiveContainer>
-           </div>
+           {analytics?.subjects && analytics.subjects.length > 0 ? (
+              <div style={{ width: '100%', height: 280 }}>
+                 <ResponsiveContainer width="100%" height="100%">
+                    <BarChart data={analytics.subjects} layout="vertical">
+                       <XAxis type="number" hide domain={[0, 100]} />
+                       <YAxis dataKey="name" type="category" axisLine={false} tickLine={false} tick={{ fill: '#0F172A', fontSize: 10, fontWeight: 700 }} width={80} />
+                       <Tooltip cursor={{ fill: 'transparent' }} />
+                       <Bar dataKey="score" radius={[0, 4, 4, 0]} barSize={20}>
+                          {analytics.subjects.map((entry: any, index: number) => (
+                             <Cell key={`cell-${index}`} fill={entry.score >= 70 ? '#2ECC9A' : entry.score >= 50 ? '#F2C94C' : '#FF4D4D'} />
+                          ))}
+                       </Bar>
+                    </BarChart>
+                 </ResponsiveContainer>
+              </div>
+           ) : (
+              <div className="h-[280px] flex items-center justify-center text-slate-400 text-sm">
+                 No subject strengths data yet
+              </div>
+           )}
         </div>
       </div>
 

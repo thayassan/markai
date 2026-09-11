@@ -184,9 +184,9 @@ export const Footer = () => {
         <div>
           <h4 className="font-serif font-bold mb-6 text-white">Support</h4>
           <ul className="space-y-4 text-sm text-gray-300">
-            <li><FooterExternalLink href="mailto:support@markai.demo">Help Center</FooterExternalLink></li>
+            <li><FooterLink to="/help">Help Center</FooterLink></li>
             <li><FooterLink to="/docs">API Docs</FooterLink></li>
-            <li><FooterExternalLink href="mailto:contact@markai.demo">Contact</FooterExternalLink></li>
+            <li><FooterLink to="/contact">Contact</FooterLink></li>
           </ul>
         </div>
 
