@@ -4,7 +4,7 @@ import {
   ArrowLeft, Download, CheckCircle2, Mail, Users, 
   TrendingUp, Award, Search, Sparkles, Filter, 
   ChevronRight, AlertCircle, Loader2, Play, RotateCw,
-  FileText, Clock, ShieldCheck, Copy, Check
+  FileText, Clock, ShieldCheck, Copy, Check, Eye, RotateCcw, Send
 } from 'lucide-react';
 import { Link, useParams } from 'react-router-dom';
 import { motion, AnimatePresence } from 'framer-motion';
@@ -245,6 +245,50 @@ const SessionResultsPage = () => {
     }
   });
 
+  const isSending = sendModerationMutation.isPending;
+  const handleSendForModeration = () => sendModerationMutation.mutate();
+
+  const getModerationBadge = (status: string) => {
+    const badges: Record<string, { color: string; icon: any; label: string }> = {
+      PENDING_MODERATION: {
+        color: 'bg-amber-100 text-amber-700 border border-amber-200',
+        icon: Clock,
+        label: 'Awaiting Moderator'
+      },
+      PENDING: {
+        color: 'bg-amber-100 text-amber-700 border border-amber-200',
+        icon: Clock,
+        label: 'Awaiting Moderator'
+      },
+      UNDER_REVIEW: {
+        color: 'bg-blue-100 text-blue-700 border border-blue-200',
+        icon: Eye,
+        label: 'Under Review'
+      },
+      MODERATION_APPROVED: {
+        color: 'bg-green-100 text-green-700 border border-green-200',
+        icon: ShieldCheck,
+        label: 'Moderation Approved'
+      },
+      APPROVED: {
+        color: 'bg-green-100 text-green-700 border border-green-200',
+        icon: ShieldCheck,
+        label: 'Moderation Approved'
+      },
+      MODERATION_RETURNED: {
+        color: 'bg-red-100 text-red-700 border border-red-200',
+        icon: RotateCcw,
+        label: 'Returned for Review'
+      },
+      RETURNED: {
+        color: 'bg-red-100 text-red-700 border border-red-200',
+        icon: RotateCcw,
+        label: 'Returned for Review'
+      }
+    };
+    return badges[status] || null;
+  };
+
   const handleDownloadReports = () => {
     const token = safeGetItem('markai_token');
     // Using simple window.open or a link for download
@@ -297,6 +341,8 @@ const SessionResultsPage = () => {
     return { gradeData, avgScore, highest, passRate, topicData };
   }, [results]);
 
+  const avgScore = Math.round(analytics?.avgScore || 0);
+
   const filteredResults = results?.filter((r: any) => 
     r.studentId.toLowerCase().includes(searchTerm.toLowerCase()) || 
     r.studentName?.toLowerCase().includes(searchTerm.toLowerCase())
@@ -348,6 +394,17 @@ const SessionResultsPage = () => {
               )}>
                 {session?.status}
               </span>
+              {session?.moderationStatus && (() => {
+                const badge = getModerationBadge(session.moderationStatus);
+                if (!badge) return null;
+                const Icon = badge.icon;
+                return (
+                  <span className={`inline-flex items-center gap-1.5 px-3 py-1 rounded-full text-xs font-medium ${badge.color}`}>
+                    <Icon size={11} />
+                    {badge.label}
+                  </span>
+                );
+              })()}
             </div>
             <div className="flex gap-4 text-xs font-bold text-text-muted uppercase tracking-widest">
               <span>{session?.subject}</span>
@@ -385,12 +442,12 @@ const SessionResultsPage = () => {
                    {approveAllMutation.isPending ? <Loader2 size={14} className="animate-spin" /> : <CheckCircle2 size={14} />}
                    {session?.status === 'COMPLETE' ? 'All Approved' : 'Approve All Results'}
                  </button>
-                 <button 
+                 <button
                    onClick={() => setShowModerationModal(true)}
-                   className="btn-ghost flex items-center gap-2 text-xs border border-border"
+                   className="flex items-center gap-2 px-4 py-2.5 border-2 border-navy text-navy rounded-xl hover:bg-navy hover:text-white transition-all font-medium text-sm"
                  >
-                   <ShieldCheck size={14} className="text-navy" />
-                   {session?.moderationStatus ? 'Moderation Status' : 'Send for Moderation'}
+                   <Send size={15} />
+                   Send for Moderation
                  </button>
                </>
              )}
@@ -827,96 +884,112 @@ const SessionResultsPage = () => {
       </div>
 
       {/* Moderation Modal */}
-      <AnimatePresence>
-        {showModerationModal && (
-          <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/50 backdrop-blur-sm p-4">
-            <motion.div
-              initial={{ scale: 0.95, opacity: 0 }}
-              animate={{ scale: 1, opacity: 1 }}
-              exit={{ scale: 0.95, opacity: 0 }}
-              className="card max-w-md w-full p-6 border border-border bg-surface"
-            >
-              <div className="w-10 h-10 rounded-full bg-navy/10 text-navy flex items-center justify-center mb-4">
-                <ShieldCheck size={22} />
-              </div>
-              <h3 className="text-lg font-serif font-bold text-navy mb-1">
-                Invite Second Marker / Moderator
-              </h3>
-              <p className="text-xs text-text-muted mb-4 leading-relaxed">
-                An email with a secure, 7-day token link will be sent to the moderator. They will be able to review AI marks, view student submissions, and enter mark overrides.
-              </p>
+      {showModerationModal && (
+        <div className="fixed inset-0 bg-black/40 backdrop-blur-sm flex items-center justify-center z-50">
+          <div className="bg-white rounded-2xl shadow-2xl w-full max-w-md mx-4 p-6">
 
-              <div className="space-y-3 mb-6">
-                <div>
-                  <label className="block text-xs font-bold text-navy mb-1 uppercase tracking-wider">
-                    Moderator's Email Address
-                  </label>
-                  <input 
-                    type="email"
-                    placeholder="e.g. external.examiner@university.edu"
-                    value={moderatorEmail}
-                    onChange={(e) => setModeratorEmail(e.target.value)}
-                    className="input-field text-xs w-full"
-                  />
+            {/* Header */}
+            <div className="flex items-center gap-3 mb-6">
+              <div className="w-10 h-10 bg-navy/10 rounded-xl flex items-center justify-center">
+                <ShieldCheck size={20} className="text-navy" />
+              </div>
+              <div>
+                <h2 className="text-lg font-bold text-navy">Send for Moderation</h2>
+                <p className="text-xs text-slate-400">Request a second opinion from another lecturer</p>
+              </div>
+            </div>
+
+            {/* Session summary */}
+            <div className="bg-slate-50 rounded-xl p-4 mb-5">
+              <div className="flex justify-between text-sm mb-1">
+                <span className="text-slate-500">Session</span>
+                <span className="font-medium text-navy">{session?.name}</span>
+              </div>
+              <div className="flex justify-between text-sm mb-1">
+                <span className="text-slate-500">Students</span>
+                <span className="font-medium text-navy">{session?.results?.length ?? results?.length ?? 0}</span>
+              </div>
+              <div className="flex justify-between text-sm">
+                <span className="text-slate-500">Average Score</span>
+                <span className="font-medium text-navy">{avgScore}%</span>
+              </div>
+            </div>
+
+            {/* Moderator email input */}
+            <div className="mb-4">
+              <label className="text-xs font-semibold text-slate-600 uppercase tracking-wide mb-1.5 block">
+                Moderator's Email
+              </label>
+              <div className="relative">
+                <Mail size={15} className="absolute left-3 top-1/2 -translate-y-1/2 text-slate-400" />
+                <input
+                  type="email"
+                  value={moderatorEmail}
+                  onChange={e => setModeratorEmail(e.target.value)}
+                  placeholder="colleague@university.edu"
+                  className="w-full pl-9 pr-4 py-2.5 border border-slate-200 rounded-xl text-sm focus:outline-none focus:border-navy focus:ring-2 focus:ring-navy/10"
+                />
+              </div>
+            </div>
+
+            {/* Optional note */}
+            <div className="mb-6">
+              <label className="text-xs font-semibold text-slate-600 uppercase tracking-wide mb-1.5 block">
+                Note to Moderator (optional)
+              </label>
+              <textarea
+                value={moderatorNote}
+                onChange={e => setModeratorNote(e.target.value)}
+                placeholder="Please pay particular attention to Q3 marks..."
+                rows={3}
+                className="w-full px-4 py-2.5 border border-slate-200 rounded-xl text-sm resize-none focus:outline-none focus:border-navy focus:ring-2 focus:ring-navy/10"
+              />
+            </div>
+
+            {/* Direct link if token already exists */}
+            {session?.moderatorToken && (
+              <div className="bg-slate-50 rounded-xl p-3 border border-slate-200 text-xs mb-5">
+                <span className="font-bold text-navy block mb-1">Direct Link:</span>
+                <div className="flex items-center justify-between gap-2">
+                  <span className="truncate text-slate-500 font-mono text-[11px]">
+                    {`${window.location.origin}/moderate/${session.moderatorToken}`}
+                  </span>
+                  <button
+                    type="button"
+                    onClick={() => {
+                      const url = `${window.location.origin}/moderate/${session.moderatorToken}`;
+                      navigator.clipboard.writeText(url);
+                      setCopiedModerationLink(true);
+                      setTimeout(() => setCopiedModerationLink(false), 2500);
+                    }}
+                    className="text-navy font-bold hover:underline shrink-0"
+                  >
+                    {copiedModerationLink ? 'Copied' : 'Copy'}
+                  </button>
                 </div>
-
-                <div>
-                  <label className="block text-xs font-bold text-navy mb-1 uppercase tracking-wider">
-                    Note or Instructions (Optional)
-                  </label>
-                  <textarea 
-                    rows={3}
-                    placeholder="e.g. Please pay special attention to question 3(b) rubric strictness..."
-                    value={moderatorNote}
-                    onChange={(e) => setModeratorNote(e.target.value)}
-                    className="input-field text-xs w-full p-2.5"
-                  />
-                </div>
-
-                {session?.moderatorToken && (
-                  <div className="p-3 bg-bg rounded border border-border text-xs">
-                    <span className="font-bold text-navy block mb-1">Direct Link:</span>
-                    <div className="flex items-center justify-between gap-2">
-                      <span className="truncate text-text-muted font-mono text-[11px]">
-                        {`${window.location.origin}/moderate/${session.moderatorToken}`}
-                      </span>
-                      <button
-                        type="button"
-                        onClick={() => {
-                          const url = `${window.location.origin}/moderate/${session.moderatorToken}`;
-                          navigator.clipboard.writeText(url);
-                          setCopiedModerationLink(true);
-                          setTimeout(() => setCopiedModerationLink(false), 2500);
-                        }}
-                        className="text-navy font-bold hover:underline shrink-0"
-                      >
-                        {copiedModerationLink ? 'Copied' : 'Copy'}
-                      </button>
-                    </div>
-                  </div>
-                )}
               </div>
+            )}
 
-              <div className="flex justify-end gap-3">
-                <button 
-                  onClick={() => setShowModerationModal(false)}
-                  className="btn-ghost text-xs border border-border"
-                >
-                  Cancel
-                </button>
-                <button 
-                  onClick={() => sendModerationMutation.mutate()}
-                  disabled={sendModerationMutation.isPending || !moderatorEmail.includes('@')}
-                  className="btn-primary text-xs flex items-center gap-1.5"
-                >
-                  {sendModerationMutation.isPending ? <Loader2 size={13} className="animate-spin" /> : <Mail size={13} />}
-                  {sendModerationMutation.isPending ? 'Sending...' : 'Send Invitation'}
-                </button>
-              </div>
-            </motion.div>
+            {/* Actions */}
+            <div className="flex gap-3">
+              <button
+                onClick={() => setShowModerationModal(false)}
+                className="flex-1 py-2.5 border border-slate-200 text-slate-600 rounded-xl text-sm hover:bg-slate-50"
+              >
+                Cancel
+              </button>
+              <button
+                onClick={handleSendForModeration}
+                disabled={!moderatorEmail || isSending}
+                className="flex-1 py-2.5 bg-navy text-white rounded-xl text-sm font-semibold hover:bg-navy/90 disabled:opacity-50 flex items-center justify-center gap-2"
+              >
+                {isSending ? <Loader2 size={14} className="animate-spin" /> : <Send size={14} />}
+                {isSending ? 'Sending...' : 'Send Invitation'}
+              </button>
+            </div>
           </div>
-        )}
-      </AnimatePresence>
+        </div>
+      )}
     </DashboardLayout>
   );
 };

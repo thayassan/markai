@@ -3820,6 +3820,14 @@ Log in to MarkAI to review results.`.trim()
         session.moderationStatus = 'UNDER_REVIEW';
       }
 
+      const results = session.results || [];
+      const avgScore = results.length > 0 
+        ? Math.round((results.reduce((acc: number, r: any) => acc + r.percentage, 0) / results.length) * 10) / 10 
+        : 0;
+      const passRate = results.length > 0
+        ? Math.round((results.filter((r: any) => r.percentage >= 40).length / results.length) * 100)
+        : 0;
+
       res.json({
         session: {
           id: session.id,
@@ -3835,7 +3843,11 @@ Log in to MarkAI to review results.`.trim()
           moderationFeedback: session.moderationFeedback,
           submittedAt: session.submittedAt,
           moderatedAt: session.moderatedAt,
-          lecturer: session.lecturer
+          lecturer: session.lecturer,
+          lecturerName: session.lecturer?.fullName,
+          avgScore,
+          passRate,
+          results
         },
         results: session.results,
         overrides: session.moderationOverrides
@@ -3863,7 +3875,7 @@ Log in to MarkAI to review results.`.trim()
         return res.status(404).json({ error: 'Invalid moderation session' });
       }
 
-      if (session.moderationStatus === 'APPROVED') {
+      if (session.moderationStatus === 'MODERATION_APPROVED' || session.moderationStatus === 'APPROVED') {
         return res.status(400).json({ error: 'This session has already been approved and finalised.' });
       }
 
@@ -3951,10 +3963,14 @@ Log in to MarkAI to review results.`.trim()
   app.post('/api/moderation/:token/decision', async (req, res) => {
     try {
       const { token } = req.params;
-      const { decision, feedback } = req.body; // 'APPROVE' or 'RETURN'
+      const { decision, feedback, note, overrides } = req.body;
 
-      if (!['APPROVE', 'RETURN'].includes(decision)) {
-        return res.status(400).json({ error: "Decision must be 'APPROVE' or 'RETURN'" });
+      const normDecision = (decision || '').toUpperCase();
+      const isApproval = normDecision.includes('APPROVE') || normDecision === 'ADJUST';
+      const isReturn = normDecision.includes('RETURN');
+
+      if (!isApproval && !isReturn) {
+        return res.status(400).json({ error: "Decision must be 'approve', 'adjust', or 'return'" });
       }
 
       const session = await (prisma as any).markingSession.findFirst({
@@ -3969,14 +3985,72 @@ Log in to MarkAI to review results.`.trim()
         return res.status(404).json({ error: 'Invalid moderation session' });
       }
 
-      const newStatus = decision === 'APPROVE' ? 'APPROVED' : 'RETURNED';
+      // If overrides object is passed in the decision request, apply any pending overrides
+      if (overrides && typeof overrides === 'object') {
+        for (const [qId, modMark] of Object.entries(overrides)) {
+          if (typeof modMark === 'number') {
+            const qResult = await (prisma as any).questionResult.findUnique({
+              where: { id: qId }
+            });
+            if (qResult) {
+              const existingOv = await (prisma as any).moderationOverride.findFirst({
+                where: { sessionId: session.id, questionResultId: qId }
+              });
+              if (existingOv) {
+                await (prisma as any).moderationOverride.update({
+                  where: { id: existingOv.id },
+                  data: { moderatorMark: modMark }
+                });
+              } else {
+                await (prisma as any).moderationOverride.create({
+                  data: {
+                    sessionId: session.id,
+                    questionResultId: qId,
+                    originalMark: qResult.lecturerOverride ?? qResult.marksAwarded,
+                    moderatorMark: modMark,
+                    moderatorNote: note || null
+                  }
+                });
+              }
+
+              await (prisma as any).questionResult.update({
+                where: { id: qId },
+                data: { lecturerOverride: modMark }
+              });
+
+              // Recalculate student total
+              const studentQuestions = await (prisma as any).questionResult.findMany({
+                where: { studentResultId: qResult.studentResultId }
+              });
+              const newTotal = studentQuestions.reduce((sum: number, q: any) => {
+                const m = q.id === qId ? modMark : (q.lecturerOverride ?? q.marksAwarded);
+                return sum + m;
+              }, 0);
+              const studentRes = await (prisma as any).studentResult.findUnique({
+                where: { id: qResult.studentResultId }
+              });
+              const maxM = studentRes?.maxMarks || 100;
+              await (prisma as any).studentResult.update({
+                where: { id: qResult.studentResultId },
+                data: {
+                  totalMarks: newTotal,
+                  percentage: Math.round((newTotal / maxM) * 1000) / 10
+                }
+              });
+            }
+          }
+        }
+      }
+
+      const newStatus = isApproval ? 'MODERATION_APPROVED' : 'MODERATION_RETURNED';
+      const modComments = feedback || note || null;
 
       await (prisma as any).markingSession.update({
         where: { id: session.id },
         data: {
           moderationStatus: newStatus,
           moderatedAt: new Date(),
-          moderationFeedback: feedback || null
+          moderationFeedback: modComments
         }
       });
 
@@ -3986,19 +4060,18 @@ Log in to MarkAI to review results.`.trim()
           await resend.emails.send({
             from: 'MarkAI <noreply@markai.edu>',
             to: session.lecturer.email,
-            subject: `Moderation ${decision === 'APPROVE' ? 'Approved' : 'Returned'}: ${session.name}`,
+            subject: `Moderation ${isApproval ? 'Approved' : 'Returned'}: ${session.name}`,
             html: `
               <div style="font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, sans-serif; max-width: 600px; margin: 0 auto; color: #1e293b;">
                 <h2 style="color: #0f172a;">Assessment Moderation Update</h2>
                 <p>Hello <strong>${session.lecturer.fullName}</strong>,</p>
                 <p>The external moderator (<strong>${session.moderatorEmail || 'Moderator'}</strong>) has submitted their decision for <strong>${session.name}</strong>:</p>
 
-                <div style="background-color: ${decision === 'APPROVE' ? '#f0fdf4' : '#fef2f2'}; border: 1px solid ${decision === 'APPROVE' ? '#bbf7d0' : '#fecaca'}; border-radius: 8px; padding: 16px; margin: 20px 0;">
-                  <h3 style="margin: 0 0 8px 0; color: ${decision === 'APPROVE' ? '#166534' : '#991b1b'};">
-                    ${decision === 'APPROVE' ? '✓ Marks Approved & Finalised' : '⚠ Session Returned with Feedback'}
+                <div style="background-color: ${isApproval ? '#f0fdf4' : '#fef2f2'}; border: 1px solid ${isApproval ? '#bbf7d0' : '#fecaca'}; border-radius: 8px; padding: 16px; margin: 20px 0;">
+                  <h3 style="margin: 0 0 8px 0; color: ${isApproval ? '#166534' : '#991b1b'};">
+                    ${isApproval ? '✓ Marks Approved & Finalised' : '⚠ Session Returned with Feedback'}
                   </h3>
-                  <p style="margin: 4px 0;"><strong>Overrides Applied:</strong> ${session.moderationOverrides?.length || 0} question mark(s) modified</p>
-                  ${feedback ? `<p style="margin: 12px 0 4px; padding-top: 8px; border-top: 1px dashed #cbd5e1;"><strong>Moderator Comments:</strong> ${feedback}</p>` : ''}
+                  ${modComments ? `<p style="margin: 12px 0 4px; padding-top: 8px; border-top: 1px dashed #cbd5e1;"><strong>Moderator Comments:</strong> ${modComments}</p>` : ''}
                 </div>
 
                 <p>You can view the full moderation log and final student records directly in your MarkAI dashboard.</p>
@@ -4014,7 +4087,7 @@ Log in to MarkAI to review results.`.trim()
         success: true,
         moderationStatus: newStatus,
         moderatedAt: new Date(),
-        feedback
+        feedback: modComments
       });
     } catch (error: any) {
       logger.error('Failed to submit moderation decision:', error);
