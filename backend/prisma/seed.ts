@@ -19,7 +19,7 @@ async function main() {
       password: 'Student@1234',
       name: 'Fatima Al-Rashidi',
       role: 'STUDENT',
-      studentCode: 'S2024-0042',
+      studentCode: 'CS/2024/042',
     },
     {
       email: 'lecturer@markai.demo',
@@ -55,6 +55,35 @@ async function main() {
         studentCode: user.studentCode,
       },
     });
+  }
+
+  // Migrate any previous demo student results/answer sheets from S2024-0042 to CS/2024/042
+  const updatedResults = await (prisma as any).studentResult.updateMany({
+    where: {
+      OR: [
+        { studentId: { contains: 'S2024-0042' } },
+        { studentCode: { contains: 'S2024-0042' } }
+      ]
+    },
+    data: {
+      studentId: 'CS/2024/042',
+      studentCode: 'CS/2024/042'
+    }
+  });
+  if (updatedResults.count > 0) {
+    console.log(`Migrated ${updatedResults.count} StudentResult record(s) to CS/2024/042`);
+  }
+
+  const updatedSheets = await (prisma as any).studentAnswerSheet.updateMany({
+    where: {
+      studentId: { contains: 'S2024-0042' }
+    },
+    data: {
+      studentId: 'CS/2024/042'
+    }
+  });
+  if (updatedSheets.count > 0) {
+    console.log(`Migrated ${updatedSheets.count} StudentAnswerSheet record(s) to CS/2024/042`);
   }
 
   // Add a sample class
