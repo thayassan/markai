@@ -2591,18 +2591,22 @@ Do not count the pages sequentially as Q1, Q2, Q3, Q4, Q5, Q6, Q7, Q8. Find the 
       }
 
       const created = await (prisma as any).studentAnswerSheet.createMany({
-        data: students.map((s: any) => ({
-          sessionId: id,
-          studentId: s.studentId && s.studentId.trim() !== ''
-            ? s.studentId
-            : `TEMP_${Math.random().toString(36).substr(2, 9)}`,
-          studentName: s.studentName || s.studentId || 'Unknown Student',
-          pdfUrl: s.pdfUrl || '',
-          textUrl: s.textUrl || null,
-          extractedText: s.extractedText,
-          extractMethod: s.extractMethod || 'unknown',
-          status: 'PENDING'
-        })),
+        data: students.map((s: any) => {
+          const rawId = typeof s.studentId === 'string' ? s.studentId.trim() : '';
+          const rawName = typeof s.studentName === 'string' ? s.studentName.trim() : '';
+          return {
+            sessionId: id,
+            studentId: rawId !== ''
+              ? rawId
+              : `TEMP_${Math.random().toString(36).substr(2, 9)}`,
+            studentName: rawName || rawId || 'Unknown Student',
+            pdfUrl: s.pdfUrl || '',
+            textUrl: s.textUrl || null,
+            extractedText: s.extractedText,
+            extractMethod: s.extractMethod || 'unknown',
+            status: 'PENDING'
+          };
+        }),
         skipDuplicates: true
       });
 
@@ -3404,13 +3408,16 @@ Do not count the pages sequentially as Q1, Q2, Q3, Q4, Q5, Q6, Q7, Q8. Find the 
             session
           );
 
+          const normalizedStudentId = (sheet.studentId || '').trim();
+          const normalizedStudentName = (sheet.studentName || sheet.studentId || 'Unknown Student').trim();
+
           await dbRetry(() => (prisma as any).studentResult.upsert({
-            where: { sessionId_studentId: { sessionId: id, studentId: sheet.studentId } },
+            where: { sessionId_studentId: { sessionId: id, studentId: normalizedStudentId } },
             create: {
               sessionId: id,
-              studentId: sheet.studentId,
-              studentName: sheet.studentName,
-              studentCode: sheet.studentId,
+              studentId: normalizedStudentId,
+              studentName: normalizedStudentName,
+              studentCode: normalizedStudentId,
               answerPdfUrl: sheet.pdfUrl,
               totalMarks: markingResult.totalMarks,
               maxMarks: markingResult.maxMarks,
@@ -4224,11 +4231,13 @@ Log in to MarkAI to review results.`.trim()
         where: { sessionId_studentId: { sessionId: id, studentId } }
       }).catch(() => { });
 
+      const cleanStudentId = (resultData.studentId || studentId || '').trim();
       const dbResult = await (prisma as any).studentResult.create({
         data: {
           sessionId: id,
-          studentId: resultData.studentId,
-          studentName: answerSheet.studentName,
+          studentId: cleanStudentId,
+          studentName: (answerSheet.studentName || cleanStudentId).trim(),
+          studentCode: cleanStudentId,
           answerPdfUrl: answerSheet.pdfUrl,
           totalMarks: resultData.totalMarks,
           maxMarks: resultData.maxMarks,
@@ -4763,18 +4772,19 @@ Log in to MarkAI to review results.`.trim()
     try {
       const userType = (req.user.userType || '').toUpperCase();
       if (userType === 'STUDENT') {
-        let studentCode = req.user.studentCode;
+        let studentCode = (req.user.studentCode || '').trim();
         if (!studentCode && req.user.id) {
           const dbUser = await (prisma as any).user.findUnique({ where: { id: req.user.id }, select: { studentCode: true } });
-          studentCode = dbUser?.studentCode;
+          studentCode = (dbUser?.studentCode || '').trim();
         }
 
         if (!studentCode) {
           return res.json([]);
         }
 
+        const candidateIds = Array.from(new Set([studentCode, ` ${studentCode}`, `${studentCode} `, ` ${studentCode} `]));
         const results = await (prisma as any).studentResult.findMany({ 
-          where: { studentId: studentCode }, 
+          where: { studentId: { in: candidateIds } }, 
           include: { session: true, questions: true }, 
           orderBy: { createdAt: 'desc' } 
         });
@@ -4812,18 +4822,19 @@ Log in to MarkAI to review results.`.trim()
 
         res.json({ totalSessions, papersMarked, pendingReview, avgClassScore });
       } else if (userType === 'STUDENT') {
-        let studentCode = req.user.studentCode;
+        let studentCode = (req.user.studentCode || '').trim();
         if (!studentCode && req.user.id) {
           const dbUser = await (prisma as any).user.findUnique({ where: { id: req.user.id }, select: { studentCode: true } });
-          studentCode = dbUser?.studentCode;
+          studentCode = (dbUser?.studentCode || '').trim();
         }
 
         if (!studentCode) {
           return res.json({ papersSubmitted: 0, averageScore: 0, bestGrade: 'N/A', streak: 0 });
         }
 
+        const candidateIds = Array.from(new Set([studentCode, ` ${studentCode}`, `${studentCode} `, ` ${studentCode} `]));
         const results = await (prisma as any).studentResult.findMany({
-          where: { studentId: studentCode },
+          where: { studentId: { in: candidateIds } },
           select: { percentage: true, grade: true, createdAt: true }
         });
 

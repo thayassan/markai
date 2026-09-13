@@ -560,8 +560,8 @@ const NewSessionPage = () => {
 
       const payload = {
         students: uploadedSheets.map(s => ({
-          studentId: s.studentId,
-          studentName: s.studentName,
+          studentId: (s.studentId || '').trim(),
+          studentName: (s.studentName || '').trim(),
           extractedText: s.extractedText,
           pdfUrl: s.fileUrl,
           textUrl: s.textUrl,
@@ -1225,7 +1225,8 @@ const NewSessionPage = () => {
                               placeholder="ID (Required) *"
                               value={s.studentId}
                               readOnly={false}
-                              onChange={e => setStudentSheets(prev => prev.map((item, i) => i === idx ? { ...item, studentId: e.target.value } : item))}
+                              onChange={e => setStudentSheets(prev => prev.map((item, i) => i === idx ? { ...item, studentId: e.target.value.trimStart() } : item))}
+                              onBlur={e => setStudentSheets(prev => prev.map((item, i) => i === idx ? { ...item, studentId: e.target.value.trim() } : item))}
                             />
                           </td>
                           <td className="px-6 py-4">
@@ -1235,7 +1236,8 @@ const NewSessionPage = () => {
                               placeholder="Student Name (Optional)"
                               value={s.studentName}
                               readOnly={false}
-                              onChange={e => setStudentSheets(prev => prev.map((item, i) => i === idx ? { ...item, studentName: e.target.value } : item))}
+                              onChange={e => setStudentSheets(prev => prev.map((item, i) => i === idx ? { ...item, studentName: e.target.value.trimStart() } : item))}
+                              onBlur={e => setStudentSheets(prev => prev.map((item, i) => i === idx ? { ...item, studentName: e.target.value.trim() } : item))}
                             />
                           </td>
                           <td className="px-6 py-4">
@@ -1350,7 +1352,7 @@ const NewSessionPage = () => {
                           const filename = file.name.toUpperCase();
                           const match = filename.match(/(STU[-_]?\d+|[A-Z]\d{3,})/i);
                           return {
-                            studentId: match ? match[0] : '',
+                            studentId: match ? match[0].trim() : '',
                             studentName: '',
                             file: file,
                             fileUrl: '',
@@ -1470,7 +1472,8 @@ const NewSessionPage = () => {
                                      )} 
                                      placeholder="ID (Required) *"
                                      value={s.studentId}
-                                     onChange={e => setStudentSheets(prev => prev.map((item, i) => i === idx ? { ...item, studentId: e.target.value } : item))}
+                                     onChange={e => setStudentSheets(prev => prev.map((item, i) => i === idx ? { ...item, studentId: e.target.value.trimStart() } : item))}
+                                     onBlur={e => setStudentSheets(prev => prev.map((item, i) => i === idx ? { ...item, studentId: e.target.value.trim() } : item))}
                                    />
                                  </td>
                                  <td className="px-6 py-4">
@@ -1479,7 +1482,8 @@ const NewSessionPage = () => {
                                      className="input h-9 text-xs bg-white border-border hover:border-navy/30 focus:border-navy transition-all" 
                                      placeholder="Student Name (Optional)"
                                      value={s.studentName}
-                                     onChange={e => setStudentSheets(prev => prev.map((item, i) => i === idx ? { ...item, studentName: e.target.value } : item))}
+                                     onChange={e => setStudentSheets(prev => prev.map((item, i) => i === idx ? { ...item, studentName: e.target.value.trimStart() } : item))}
+                                     onBlur={e => setStudentSheets(prev => prev.map((item, i) => i === idx ? { ...item, studentName: e.target.value.trim() } : item))}
                                    />
                                  </td>
                                  <td className="px-6 py-4 text-right">
@@ -1622,7 +1626,7 @@ const NewSessionPage = () => {
                         const uploadedCount = studentSheets.filter(s => s.uploaded).length;
                         if (uploadedCount === 0) return alert('At least 1 student must have an uploaded answer sheet');
                         
-                        const hasEmptyId = studentSheets.some(s => s.uploaded && !s.studentId);
+                        const hasEmptyId = studentSheets.some(s => s.uploaded && (!s.studentId || !s.studentId.trim()));
                         if (hasEmptyId) return alert('Please assign Student IDs to all uploaded sheets');
 
                         createAndParseSession();
