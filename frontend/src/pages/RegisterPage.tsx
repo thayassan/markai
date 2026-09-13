@@ -40,9 +40,9 @@ const RegisterPage = () => {
     }
 
     if (userType === 'STUDENT') {
-      const codeRegex = /^[A-Za-z0-9-]{4,20}$/;
-      if (!codeRegex.test(studentCode)) {
-        setError("Student ID must be 4–20 characters, letters, numbers, and hyphens only");
+      const codeRegex = /^(CT|CS|ET)\/20\d{2}\/\d{3}$/;
+      if (!codeRegex.test(studentCode.trim())) {
+        setError("Student ID must be in the format CT/2024/001, CS/2024/001, or ET/2024/001");
         return;
       }
     }
@@ -63,7 +63,7 @@ const RegisterPage = () => {
           password,
           userType,
           inviteCode: userType === 'LECTURER' ? inviteCode : undefined,
-          studentCode: userType === 'STUDENT' ? studentCode : undefined,
+          studentCode: userType === 'STUDENT' ? studentCode.trim() : undefined,
           universityName: userType === 'LECTURER' ? universityName : undefined,
         }),
       });
@@ -195,16 +195,20 @@ const RegisterPage = () => {
 
             {userType === 'STUDENT' && (
               <div>
-                <label className="block text-xs font-bold text-navy uppercase tracking-widest mb-2">Student ID</label>
+                <div className="flex items-center justify-between mb-1">
+                  <label className="block text-xs font-bold text-navy uppercase tracking-widest">Student ID</label>
+                  <span className="text-[10px] text-text-muted font-medium">CT, CS, or ET</span>
+                </div>
+                <p className="text-[11px] text-text-muted mb-2">Allowed department prefixes: CT, CS, or ET (e.g. CT/2024/001)</p>
                 <div className="relative">
                   <IdCard className="absolute left-4 top-1/2 -translate-y-1/2 text-text-muted" size={18} />
                   <input 
                     type="text" 
                     required={userType === 'STUDENT'}
                     value={studentCode}
-                    onChange={(e) => setStudentCode(e.target.value)}
-                    placeholder="e.g. S2024-0042"
-                    className="w-full pl-12 pr-4 py-3 bg-bg border border-border rounded-button focus:outline-none focus:ring-2 focus:ring-accent/50 transition-all"
+                    onChange={(e) => setStudentCode(e.target.value.toUpperCase())}
+                    placeholder="e.g. CT/2024/001"
+                    className="w-full pl-12 pr-4 py-3 bg-bg border border-border rounded-button focus:outline-none focus:ring-2 focus:ring-accent/50 transition-all font-mono text-sm placeholder:font-sans placeholder:text-sm"
                   />
                 </div>
               </div>

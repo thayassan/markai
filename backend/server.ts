@@ -1834,9 +1834,11 @@ async function startServer() {
       const exists = await (prisma as any).user.findUnique({ where: { email } });
       if (exists) return res.status(409).json({ error: 'Email already registered' });
 
+      const cleanStudentCode = studentCode ? studentCode.trim().toUpperCase() : null;
+
       if (userType === 'STUDENT') {
-        if (!studentCode) return res.status(400).json({ error: 'Student code required' });
-        const codeExists = await (prisma as any).user.findUnique({ where: { studentCode } });
+        if (!cleanStudentCode) return res.status(400).json({ error: 'Student code required' });
+        const codeExists = await (prisma as any).user.findUnique({ where: { studentCode: cleanStudentCode } });
         if (codeExists) return res.status(409).json({ error: 'Student code already used' });
       }
 
@@ -1869,7 +1871,7 @@ async function startServer() {
           userType: assignedRole,
           role: assignedRole,
           universityId: finalUniversityId,
-          studentCode: assignedRole === 'STUDENT' ? studentCode : null
+          studentCode: assignedRole === 'STUDENT' ? cleanStudentCode : null
         }
       });
 

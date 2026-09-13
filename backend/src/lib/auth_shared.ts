@@ -21,7 +21,10 @@ export const registerSchema = z.object({
   inviteCode: z.string().optional(), // Added for Lecturer registration
   universityId: z.string().optional(),
   universityName: z.string().optional(),
-  studentCode: z.string().optional()
+  studentCode: z.string()
+    .regex(/^(CT|CS|ET)\/20\d{2}\/\d{3}$/, 'Student ID must be in the format CT/2024/001, CS/2024/001, or ET/2024/001')
+    .optional()
+    .or(z.literal(''))
 });
 
 export const profileUpdateSchema = z.object({
