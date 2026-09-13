@@ -4200,9 +4200,11 @@ Log in to MarkAI to review results.`.trim()
   app.post('/api/sessions/:id/students/:studentId/re-evaluate', authMiddleware, async (req, res) => {
     try {
       const { id, studentId } = req.params;
+      const cleanStudentId = typeof studentId === 'string' ? decodeURIComponent(studentId).trim() : '';
+      const candidateIds = Array.from(new Set([cleanStudentId, ` ${cleanStudentId}`, `${cleanStudentId} `]));
       const session = await (prisma as any).markingSession.findUnique({ where: { id } });
-      const answerSheet = await (prisma as any).studentAnswerSheet.findUnique({
-        where: { sessionId_studentId: { sessionId: id, studentId } }
+      const answerSheet = await (prisma as any).studentAnswerSheet.findFirst({
+        where: { sessionId: id, studentId: { in: candidateIds } }
       });
 
       if (!session || !answerSheet) {
@@ -4227,19 +4229,19 @@ Log in to MarkAI to review results.`.trim()
 
       // Clean up previous results before creating new ones
       await (prisma as any).questionResult.deleteMany({
-        where: { studentResult: { sessionId: id, studentId } }
+        where: { studentResult: { sessionId: id, studentId: { in: candidateIds } } }
       });
-      await (prisma as any).studentResult.delete({
-        where: { sessionId_studentId: { sessionId: id, studentId } }
+      await (prisma as any).studentResult.deleteMany({
+        where: { sessionId: id, studentId: { in: candidateIds } }
       }).catch(() => { });
 
-      const cleanStudentId = (resultData.studentId || studentId || '').trim();
+      const finalStudentId = (resultData.studentId || cleanStudentId).trim();
       const dbResult = await (prisma as any).studentResult.create({
         data: {
           sessionId: id,
-          studentId: cleanStudentId,
-          studentName: (answerSheet.studentName || cleanStudentId).trim(),
-          studentCode: cleanStudentId,
+          studentId: finalStudentId,
+          studentName: (answerSheet.studentName || finalStudentId).trim(),
+          studentCode: finalStudentId,
           answerPdfUrl: answerSheet.pdfUrl,
           totalMarks: resultData.totalMarks,
           maxMarks: resultData.maxMarks,
@@ -4486,8 +4488,13 @@ Log in to MarkAI to review results.`.trim()
   app.get('/api/results', authMiddleware, async (req, res) => {
     try {
       const { sessionId, studentId } = req.query;
+      const cleanStudentId = typeof studentId === 'string' ? decodeURIComponent(studentId).trim() : '';
+      const candidateIds = Array.from(new Set([cleanStudentId, ` ${cleanStudentId}`, `${cleanStudentId} `]));
       const result = await (prisma as any).studentResult.findFirst({
-        where: { sessionId: sessionId as string, studentId: studentId as string },
+        where: { 
+          sessionId: sessionId as string, 
+          studentId: { in: candidateIds } 
+        },
         include: {
           questions: { orderBy: { questionNumber: 'asc' } }
         }
@@ -4501,10 +4508,12 @@ Log in to MarkAI to review results.`.trim()
 
   app.get('/api/sessions/:sessionId/students/:studentId', authMiddleware, async (req, res) => {
     try {
+      const cleanStudentId = typeof req.params.studentId === 'string' ? decodeURIComponent(req.params.studentId).trim() : '';
+      const candidateIds = Array.from(new Set([cleanStudentId, ` ${cleanStudentId}`, `${cleanStudentId} `]));
       const result = await (prisma as any).studentResult.findFirst({
         where: {
           sessionId: req.params.sessionId,
-          studentId: req.params.studentId
+          studentId: { in: candidateIds }
         },
         include: {
           session: true,

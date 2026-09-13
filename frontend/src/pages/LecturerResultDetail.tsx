@@ -25,7 +25,7 @@ const LecturerResultDetail = () => {
   // Queries
   const { data: result, isLoading, isError } = useQuery({
     queryKey: ['studentResult', sessionId, studentId],
-    queryFn: () => apiFetch(`/api/results?sessionId=${sessionId}&studentId=${studentId}`).then(res => {
+    queryFn: () => apiFetch(`/api/results?sessionId=${sessionId}&studentId=${encodeURIComponent(studentId || '')}`).then(res => {
       if (!res.ok) throw new Error('Result not found or server error');
       return res.json();
     })

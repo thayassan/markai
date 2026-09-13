@@ -775,7 +775,7 @@ const SessionResultsPage = () => {
                         </div>
                       </td>
                       <td className="px-8 py-5 text-right">
-                        <Link to={`/lecturer/sessions/${id}/students/${res.studentId}`} className="btn-ghost py-1.5 px-3 text-[10px] border border-border hover:bg-white">
+                        <Link to={`/lecturer/sessions/${id}/students/${encodeURIComponent(res.studentId)}`} className="btn-ghost py-1.5 px-3 text-[10px] border border-border hover:bg-white">
                           View Detail
                         </Link>
                       </td>
