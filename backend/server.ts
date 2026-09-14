@@ -597,40 +597,116 @@ function recoverPartialJSON(rawText: string): any[] {
 
 function buildFallbackQuestionsFromText(text: string): any[] {
   const questions: any[] = [];
-
-  // Match common hierarchical question patterns
-  const patterns = [
-    // Q1(a)(i), Q2(b)(ii), Q3(c) etc.
-    /\b(Q\d+\s*\([a-z]\)\s*\([ivxlc]+\))/gi,
-    // Q1 (a) (i) with spaces
-    /\b(Q\d+\s*\(\s*[a-z]\s*\)\s*\(\s*[ivxlc]+\s*\))/gi,
-    // 1.(a)(i) numeric prefix
-    /\b(\d+\.\s*\([a-z]\)\s*\([ivxlc]+\))/gi,
-    // Q1(a) without sub-part
-    /\b(Q\d+\s*\([a-z]\)(?!\s*\([ivxlc]))/gi,
-    // Simple Q1, Q2, Q3
-    /\b(Q\d+)(?!\s*\()/gi
-  ];
-
   const foundNumbers = new Set<string>();
 
-  for (const pattern of patterns) {
-    const matches = [...text.matchAll(pattern)];
-    for (const match of matches) {
-      const qNum = match[1].replace(/\s+/g, '').toUpperCase();
-      if (!foundNumbers.has(qNum)) {
-        foundNumbers.add(qNum);
-        questions.push({
-          questionNumber: qNum,
-          questionText: `Question ${qNum}`,
-          marksAvailable: 5, // conservative default
-          topic: 'General'
-        });
+  const addQuestion = (qNum: string, qText: string = '') => {
+    const cleanNum = qNum.trim();
+    if (!foundNumbers.has(cleanNum)) {
+      foundNumbers.add(cleanNum);
+      questions.push({
+        questionNumber: cleanNum,
+        questionText: qText.trim() || `Question ${cleanNum}`,
+        marksAvailable: 0,
+        topic: inferTopic(qText)
+      });
+    }
+  };
+
+  const lines = text
+    .replace(/\r\n/g, '\n').replace(/\r/g, '\n')
+    .split('\n')
+    .map(l => l.trim());
+
+  let currentMainQ = '';
+  let mainQText = '';
+  let subparts: { part: string; text: string }[] = [];
+
+  const flushCurrent = () => {
+    if (currentMainQ) {
+      if (subparts.length > 0) {
+        for (const sp of subparts) {
+          const combinedText = mainQText
+            ? `${mainQText.trim().replace(/:$/, '')}: ${sp.text}`.trim()
+            : sp.text;
+          addQuestion(`${currentMainQ}(${sp.part})`, combinedText || mainQText);
+        }
+      } else {
+        addQuestion(currentMainQ, mainQText);
+      }
+    }
+    currentMainQ = '';
+    mainQText = '';
+    subparts = [];
+  };
+
+  for (let i = 0; i < lines.length; i++) {
+    const line = lines[i];
+    if (!line) continue;
+
+    // Ignore common non-question header lines
+    if (/^(quiz|assignment|time:|date:|marks?:|module:|gtec|course|faculty|department|total)\b/i.test(line)) {
+      continue;
+    }
+
+    // Bare numbered questions: '01. Draw...', '1. ...', or 'Q1.', 'Q01:', 'Question 1'
+    const mainQMatch = line.match(/^(?:Q(?:uestion)?\s*)?(\d{1,2})\s*[:.]\s*(.*)$/i);
+    // Sub-part patterns: 'a) ...', '(a) ...', 'a. ...', or '(i) ...'
+    const subPartMatch = line.match(/^(\(?[a-d]\)|\(?[a-d]\.|\(?i{1,3}\)|\(?iv\)|\(?v\))\s*(.*)$/i);
+
+    if (mainQMatch) {
+      flushCurrent();
+      currentMainQ = mainQMatch[1];
+      mainQText = mainQMatch[2] || '';
+    } else if (currentMainQ && subPartMatch && !line.match(/^(and|or|are|as|at)\b/i)) {
+      const partKey = subPartMatch[1].replace(/[\(\)\.\s]/g, '').toLowerCase();
+      subparts.push({
+        part: partKey,
+        text: subPartMatch[2] || ''
+      });
+    } else if (currentMainQ) {
+      if (subparts.length > 0) {
+        const lastSp = subparts[subparts.length - 1];
+        if (lastSp.text.length < 300) {
+          lastSp.text += (lastSp.text ? ' ' : '') + line;
+        }
+      } else {
+        if (mainQText.length < 300) {
+          mainQText += (mainQText ? ' ' : '') + line;
+        }
+      }
+    }
+  }
+  flushCurrent();
+
+  // If line parsing did not find structured questions, fall back to regex scanning
+  if (questions.length === 0) {
+    const patterns = [
+      // Q1(a)(i), Q2(b)(ii), Q3(c) etc.
+      /\b(Q\d+\s*\([a-z]\)\s*\([ivxlc]+\))/gi,
+      // Q1 (a) (i) with spaces
+      /\b(Q\d+\s*\(\s*[a-z]\s*\)\s*\(\s*[ivxlc]+\s*\))/gi,
+      // 1.(a)(i) numeric prefix
+      /\b(\d+\.\s*\([a-z]\)\s*\([ivxlc]+\))/gi,
+      // Q1(a) without sub-part
+      /\b(Q\d+\s*\([a-z]\)(?!\s*\([ivxlc]))/gi,
+      // Simple Q1, Q2, Q3
+      /\b(Q\d+)(?!\s*\()/gi,
+      // Bare numbered questions: '01. Draw...', '1. ...'
+      /^\s*(\d{1,2})\.\s+(.*)$/gm,
+      // Bare numbered questions with sub-parts
+      /^\s*(\d{1,2})\.\s*[\s\S]*?^\s*([a-d])\)/gim
+    ];
+
+    for (const pattern of patterns) {
+      const matches = [...text.matchAll(pattern)];
+      for (const match of matches) {
+        const qNum = match[1].replace(/\s+/g, '').toUpperCase();
+        addQuestion(qNum, match[2] || '');
       }
     }
   }
 
-  logger.info(`buildFallbackQuestionsFromText: found ${questions.length} question numbers via pattern matching`);
+  logger.info(`buildFallbackQuestionsFromText: found ${questions.length} questions from text`);
   return questions;
 }
 
@@ -852,33 +928,31 @@ function extractMarksFromMarkSchemeDirectly(markSchemeText: string, existingQues
 // ─── APPROACH 2: Gemini with a hierarchical-structure-aware prompt ────────────
 async function parseQuestionPaperWithGemini(questionPdfText: string): Promise<any[]> {
   const prompt = `
-You are parsing a university exam paper. The text was extracted from a PDF and has this specific format:
+You are an expert exam paper analyzer. Extract all questions and sub-questions from this exam paper text.
 
-IMPORTANT FORMAT NOTES:
-- Main question numbers appear alone on a line: "Q1:" or "1."
-- Part letters appear alone on a line: "(a)" or "(b)"
-- Sub-part numbers appear at the start of a line with the question: "(i)Define the terms..."
-- THE MARK VALUE APPEARS ON THE VERY NEXT LINE after the question text, like this:
-    "(i)Define the terms software and software engineering."
-    "(10 marks)"
-  OR at the end of the question line: "(i)Define... (10 marks)"
-- Each main question totals exactly 100 marks
-- There are exactly 4 main questions, each with 4 parts (a,b,c,d), each part with 2 sub-parts (i,ii)
-- So there are exactly 32 sub-questions total
+RULES:
+- Questions may be numbered in various formats: "1.", "01.", "Q1:", "Question 1", etc.
+- Sub-questions may use letters: "(a)", "a)", "(b)", "b)", and sub-sub-questions: "(i)", "i.", "(ii)", "ii."
+- Extract each leaf-level question/sub-question that students must answer.
+  For example, if Question 03 has parts a) and b), extract "03(a)" and "03(b)" (or "Q03(a)", "Q03(b)").
+  If Question 01 has no sub-parts, extract "01" (or "Q01").
+- For marksAvailable: extract the stated mark as an integer if explicitly printed (e.g. "(10 marks)", "[5 marks]").
+  If NO marks are stated for a question or anywhere in the paper, set marksAvailable to 0. Do NOT guess or invent marks.
+- questionText: the actual question being asked (without mark annotations).
+- topic: the main concept or topic being tested in this question.
 
 EXAM PAPER TEXT:
 ${questionPdfText}
 
-Extract ALL 32 sub-questions. For each one:
-- questionNumber: "Q1(a)(i)", "Q1(a)(ii)", "Q2(c)(ii)", etc.
-- questionText: the actual question asked
-- marksAvailable: the number from "(N marks)" — READ FROM THE TEXT, do not guess
-- topic: the concept being tested
-
-The grand total of all marksAvailable must equal 400 (100 per question × 4 questions).
-
-Return ONLY a valid JSON array, no markdown:
-[{"questionNumber":"Q1(a)(i)","questionText":"Define the terms software and software engineering.","marksAvailable":10,"topic":"Software Definitions"}]`;
+Return ONLY a valid JSON array of objects, with no markdown or backticks:
+[
+  {
+    "questionNumber": "01",
+    "questionText": "Define the terms...",
+    "marksAvailable": 0,
+    "topic": "Topic Name"
+  }
+]`;
 
   const response = await callGeminiSafe(prompt, {
     context: 'parse-question-paper-v2',
@@ -901,15 +975,14 @@ Return ONLY a valid JSON array, no markdown:
 }
 
 function stripCoverPage(text: string): string {
-  // The actual exam questions always start with "1." or "Q1" or "1 ."
-  // preceded by a blank line, after the cover page instructions.
-  // Find the first occurrence of a main question number on its own line.
-
+  // Find the first occurrence of a main question number
   const questionStartPatterns = [
     // "1." or "1 ." or "Q1." at the start of a line, alone
     /^(?:Q\s*)?1\s*\.?\s*$/m,
     // "1.\n(a)" — question number followed immediately by a part
     /^(?:Q\s*)?1\s*\.?\s*\n\s*\(\s*[a-d]\s*\)/m,
+    // "01." or "1." or "Q1." at start of line followed by question text
+    /^\s*(?:Q(?:uestion)?\s*)?0?1\s*[:.]\s+/m,
   ];
 
   let earliestIndex = text.length;
@@ -923,7 +996,6 @@ function stripCoverPage(text: string): string {
 
   if (earliestIndex === text.length) {
     // Couldn't find a clear question start — try a broader search
-    // Look for the first "(a)" or "(a)(i)" after an instructions section
     const instructionEnd = text.search(/INSTRUCTIONS?[\s\S]*?\n\n/i);
     if (instructionEnd > 0) {
       const afterInstructions = text.indexOf('\n1', instructionEnd);
@@ -944,37 +1016,93 @@ function stripCoverPage(text: string): string {
   return text;
 }
 
-function validateAndFixMarks(questions: any[], markSchemeText?: string): any[] {
-  // For this paper format, valid marks per sub-question are 10, 15, or 20
-  // Any sub-question with 0 marks or > 25 marks is likely wrong
-  const VALID_RANGE = { min: 5, max: 25 };
+function crossReferenceMarksFromMarkScheme(questions: any[], markSchemeText: string): any[] {
+  if (!markSchemeText || !questions || questions.length === 0) return questions;
 
   return questions.map(q => {
-    if (q.marksAvailable < VALID_RANGE.min || q.marksAvailable > VALID_RANGE.max) {
-      logger.warn(`Question ${q.questionNumber} has suspicious marks=${q.marksAvailable}, attempting to fix`);
+    if (Number(q.marksAvailable) > 0) return q;
 
-      // Try to find the mark in the mark scheme as a cross-reference
-      if (markSchemeText) {
-        const qNumEscaped = q.questionNumber.replace(/[()]/g, '\\$&');
-        const msMatch = markSchemeText.match(
-          new RegExp(`${qNumEscaped}[^(]*\\((\\d{1,3})\\s*marks?\\)`, 'i')
-        );
-        if (msMatch) {
-          const corrected = parseInt(msMatch[1], 10);
-          logger.info(`  Fixed ${q.questionNumber}: ${q.marksAvailable} → ${corrected} marks (from mark scheme)`);
-          return { ...q, marksAvailable: corrected };
+    const qNum = String(q.questionNumber || '').trim();
+
+    // 1. Hierarchical format like Q1(a)(i)
+    const partSubpart = qNum.match(/\(([a-d])\)\(([ivx]+)\)/i);
+    if (partSubpart) {
+      const [, part, subpart] = partSubpart;
+      const patterns = [
+        new RegExp(`\\(${part}\\)\\s*\\(${subpart}\\)[^(]*\\((\\d{1,3})\\s*marks?\\)`, 'i'),
+        new RegExp(`\\(${part}\\)\\(${subpart}\\).*?\\((\\d{1,3})\\s*marks?\\)`, 'i'),
+      ];
+      for (const p of patterns) {
+        const m = markSchemeText.match(p);
+        if (m) {
+          const val = parseInt(m[1], 10);
+          if (val > 0) return { ...q, marksAvailable: val };
         }
       }
+    }
 
-      // If still 0, use a context-based default based on question type
-      if (q.marksAvailable === 0) {
-        const defaultMark = (q.questionText || '').length > 100 ? 15 : 10;
-        logger.warn(`  Defaulting ${q.questionNumber} to ${defaultMark} marks`);
-        return { ...q, marksAvailable: defaultMark };
+    // 2. Sub-part format like "03(a)" or "Q3(a)" or "05(b)"
+    const singlePart = qNum.match(/^(?:Q(?:uestion)?\s*)?(\d{1,2})\(([a-d])\)/i);
+    if (singlePart) {
+      const mainNum = parseInt(singlePart[1], 10);
+      const partLetter = singlePart[2].toLowerCase();
+
+      // Find question section in mark scheme if structured
+      const qSectionRegex = new RegExp(`(?:Question|Q)\\s*0?${mainNum}\\b[\\s\\S]*?(?=(?:Question|Q)\\s*0?\\d+\\b|$)`, 'i');
+      const sectionMatch = markSchemeText.match(qSectionRegex);
+      const searchTarget = sectionMatch ? sectionMatch[0] : markSchemeText;
+
+      const patterns = [
+        new RegExp(`\\(${partLetter}\\)\\s*(\\d{1,3})\\s*marks?`, 'i'),
+        new RegExp(`\\b${partLetter}\\)\\s*(\\d{1,3})\\s*marks?`, 'i'),
+        ...(partLetter === 'a' ? [/euler\s*(?:part)?\s*[-–:]\s*(\d{1,3})\s*marks?/i] : []),
+        ...(partLetter === 'b' ? [/hamilton(?:ian)?\s*(?:part)?\s*[-–:]\s*(\d{1,3})\s*marks?/i] : []),
+      ];
+
+      for (const p of patterns) {
+        const m = searchTarget.match(p);
+        if (m) {
+          const val = parseInt(m[1], 10);
+          if (val > 0) return { ...q, marksAvailable: val };
+        }
       }
     }
+
+    // 3. Main question format like "01", "Q1", "1", "02"
+    const bareMain = qNum.match(/^(?:Q(?:uestion)?\s*)?(\d{1,2})$/i);
+    if (bareMain) {
+      const mainNum = parseInt(bareMain[1], 10);
+      const patterns = [
+        new RegExp(`(?:Question|Q)\\s*0?${mainNum}\\b[^(]*?\\((\\d{1,3})\\s*marks?\\)`, 'i'),
+        new RegExp(`(?:Question|Q)\\s*0?${mainNum}\\b[\\s\\S]*?total\\s*(\\d{1,3})\\s*marks?`, 'i'),
+      ];
+
+      for (const p of patterns) {
+        const m = markSchemeText.match(p);
+        if (m) {
+          const val = parseInt(m[1], 10);
+          if (val > 0) return { ...q, marksAvailable: val };
+        }
+      }
+    }
+
+    // 4. Fallback exact string search
+    const escapedQNum = qNum.replace(/[()]/g, '\\$&');
+    const exactMatch = markSchemeText.match(new RegExp(`${escapedQNum}[^(]*\\((\\d{1,3})\\s*marks?\\)`, 'i'));
+    if (exactMatch) {
+      const val = parseInt(exactMatch[1], 10);
+      if (val > 0) return { ...q, marksAvailable: val };
+    }
+
     return q;
   });
+}
+
+function validateAndFixMarks(questions: any[], markSchemeText?: string): any[] {
+  if (markSchemeText) {
+    questions = crossReferenceMarksFromMarkScheme(questions, markSchemeText);
+  }
+  return questions;
 }
 
 async function pdfToBase64Images(pdfBuffer: Buffer): Promise<string[]> {
@@ -1025,7 +1153,7 @@ async function parseQuestionPaperFromImages(
   let promptParts: any[] = [];
 
   if (base64Pages.length > 0) {
-    const contentPages = base64Pages.length > 1 ? base64Pages.slice(1) : base64Pages;
+    const contentPages = base64Pages;
     logger.info(`Using ${contentPages.length} content page images for Gemini Vision`);
 
     const imageContents = contentPages.map(b64 => ({
@@ -1046,31 +1174,30 @@ async function parseQuestionPaperFromImages(
     }];
   }
 
-  const prompt = `You are reading a university exam paper. Extract every sub-question and its mark allocation.
+  const prompt = `You are reading an exam paper. Extract every question and sub-question that students answer and its mark allocation.
 
 INSTRUCTIONS:
-- Look at the visual layout carefully
-- Questions are numbered: 1, 2, 3, 4 at the top level
-- Sub-questions use letters: (a), (b), (c), (d)
-- Sub-sub-questions use roman numerals: (i), (ii)
-- Mark values appear in brackets on the RIGHT side of the page: (10 marks), (15 marks), (20 marks)
-- DO NOT confuse instruction numbering (1. Answer ALL questions) with exam question numbering
-- The first page is usually a cover page — ignore it if it contains only instructions or university header
-- Extract ONLY actual exam questions, not instructions or headers
+- Look at the layout carefully across ALL pages (do NOT skip page 1 unless it contains only instructions or university header and zero exam questions).
+- Questions may be numbered: "1.", "01.", "Q1:", "Question 1", etc.
+- If a question has sub-parts (like "(a)", "a)", "(b)", "b)" or roman numerals "(i)", "(ii)"), extract each leaf sub-part (e.g. "03(a)", "03(b)" or "Q1(a)(i)").
+- If a question has no sub-parts, extract the question itself (e.g. "01", "02", "04", "06" or "Q1", "Q2").
+- Extract ONLY actual questions that students must answer, not instructions or headers.
+- If mark values appear in brackets or margins (e.g. "(10 marks)", "[5 marks]"), extract the number.
+- If NO marks are stated anywhere on the paper for a question, set marksAvailable to 0. Do NOT guess or invent marks.
 
-For each leaf-level sub-question (the ones students write answers for), extract:
-- questionNumber: full hierarchical path e.g. "Q1(a)(i)", "Q2(c)(ii)", "Q4(d)(ii)"  
+For each leaf-level question/sub-question, extract:
+- questionNumber: e.g. "01", "03(a)", "Q1(a)(i)", etc.
 - questionText: the actual question being asked (without the mark annotation)
-- marksAvailable: the NUMBER from "(N marks)" visible in the right margin — read exactly as printed
+- marksAvailable: the number from "(N marks)" or 0 if unmarked
 - topic: the main concept being tested in this question
 
 Return ONLY a valid JSON array. No markdown, no explanation:
 [
   {
-    "questionNumber": "Q1(a)(i)",
-    "questionText": "Define the terms software and software engineering.",
-    "marksAvailable": 10,
-    "topic": "Software Definitions"
+    "questionNumber": "01",
+    "questionText": "Question text here...",
+    "marksAvailable": 0,
+    "topic": "Topic Name"
   }
 ]`;
 
@@ -1138,44 +1265,16 @@ async function parseQuestionPaper(
       q.marksAvailable > 20 ? '⚠️ SUSPICIOUSLY HIGH' : '';
     logger.info(`  ${q.questionNumber}: ${q.marksAvailable} marks ${flag} (running total: ${runningTotal})`);
   });
-  logger.info(`Expected: 400, Got: ${runningTotal}, Diff: ${400 - runningTotal}`);
+  logger.info(`Direct regex extracted: ${questions.length} questions, Total: ${runningTotal}`);
   logger.info('================================');
 
-  // STEP 4: Post-extraction mark scheme cross-reference pass
+  // STEP 2b: Mark scheme cross-reference pass if any marks are 0
   const extractedTotal = questions.reduce((s, q) => s + (q.marksAvailable || 0), 0);
+  const hasZeroMarks = questions.some(q => !q.marksAvailable || q.marksAvailable === 0);
 
-  if (extractedTotal < 380 && markSchemeText) {
-    logger.warn(`Total ${extractedTotal} is below expected 400, running mark scheme cross-reference...`);
-
-    questions = questions.map(q => {
-      if (q.marksAvailable > 0) return q;
-
-      // Search mark scheme for this question's marks
-      // Mark scheme format: "(a)(i) Define... (10 marks)" or "Marking: X – N marks"
-      const partSubpart = q.questionNumber.match(/\(([a-d])\)\(([ivx]+)\)/i);
-      if (!partSubpart) return q;
-
-      const [, part, subpart] = partSubpart;
-
-      // Look for the mark near this question in the mark scheme
-      const patterns = [
-        new RegExp(`\\(${part}\\)\\s*\\(${subpart}\\)[^(]*\\((\\d{1,3})\\s*marks?\\)`, 'i'),
-        new RegExp(`\\(${part}\\)\\(${subpart}\\).*?\\((\\d{1,3})\\s*marks?\\)`, 'i'),
-      ];
-
-      for (const p of patterns) {
-        const m = markSchemeText.match(p);
-        if (m) {
-          const corrected = parseInt(m[1], 10);
-          logger.info(`  Cross-referenced ${q.questionNumber}: 0 → ${corrected} marks from mark scheme`);
-          return { ...q, marksAvailable: corrected };
-        }
-      }
-
-      logger.warn(`  Could not find marks for ${q.questionNumber} in mark scheme either`);
-      return q;
-    });
-
+  if ((hasZeroMarks || extractedTotal === 0) && markSchemeText && questions.length > 0) {
+    logger.info('Running mark scheme cross-reference for direct questions with missing marks...');
+    questions = crossReferenceMarksFromMarkScheme(questions, markSchemeText);
     const correctedTotal = questions.reduce((s, q) => s + (q.marksAvailable || 0), 0);
     logger.info(`After cross-reference: total = ${correctedTotal}`);
   }
@@ -1183,24 +1282,40 @@ async function parseQuestionPaper(
   const directTotal = questions.reduce((s, q) => s + (q.marksAvailable || 0), 0);
   logger.info(`After cover page strip & audit: ${questions.length} questions, ${directTotal} marks`);
 
-  // If direct extraction worked well, use it
-  if (questions.length >= 8 && directTotal > 50) {
+  // If direct extraction found questions and all have marks > 0, we can accept it directly
+  if (questions.length > 0 && questions.every(q => (q.marksAvailable || 0) > 0)) {
+    logger.info(`Direct extraction complete with valid marks: ${questions.length} questions, ${directTotal} marks`);
     return questions;
   }
 
   // STEP 3: Gemini fallback with cleaned text
-  logger.info('Direct extraction insufficient, calling Gemini with cleaned text...');
+  logger.info('Direct extraction insufficient or missing marks, calling Gemini with cleaned text...');
+  let geminiQuestions: any[] = [];
   try {
-    const geminiQuestions = await parseQuestionPaperWithGemini(cleanedText);
-    const geminiTotal = geminiQuestions.reduce((s, q) => s + (q.marksAvailable || 0), 0);
-    if (geminiQuestions.length >= 8 && geminiTotal > 50) {
-      return normalizeQuestionMarks(geminiQuestions);
+    geminiQuestions = await parseQuestionPaperWithGemini(cleanedText);
+    if (geminiQuestions.length > 0 && markSchemeText) {
+      geminiQuestions = crossReferenceMarksFromMarkScheme(geminiQuestions, markSchemeText);
     }
+    const geminiTotal = geminiQuestions.reduce((s, q) => s + (q.marksAvailable || 0), 0);
+    logger.info(`Gemini extracted ${geminiQuestions.length} questions, total ${geminiTotal} marks`);
   } catch (e: any) {
     logger.warn('Gemini extraction failed:', e.message);
   }
 
-  return questions.length > 0 ? questions : buildFallbackQuestionsFromText(cleanedText);
+  // Prefer the largest non-empty extraction:
+  // If Gemini extracted at least as many questions as direct regex (or if direct regex is empty), use Gemini
+  if (geminiQuestions.length >= questions.length && geminiQuestions.length > 0) {
+    logger.info(`Preferring Gemini extraction: ${geminiQuestions.length} questions (vs ${questions.length} direct)`);
+    return normalizeQuestionMarks(geminiQuestions);
+  }
+
+  if (questions.length > 0) {
+    logger.info(`Using direct extraction questions: ${questions.length} questions`);
+    return normalizeQuestionMarks(questions);
+  }
+
+  logger.info('Both direct extraction and Gemini yielded 0 questions, falling back to buildFallbackQuestionsFromText...');
+  return buildFallbackQuestionsFromText(cleanedText);
 }
 
 // ─── Validation logger — prints every question with marks to backend terminal ─
@@ -2756,21 +2871,32 @@ Do not count the pages sequentially as Q1, Q2, Q3, Q4, Q5, Q6, Q7, Q8. Find the 
           logger.info(`Attempting vision-based question paper parsing for session ${id}...`);
           const pdfBuffer = await downloadPdfFromSupabase(session.questionPdfUrl);
           parsedQuestions = await parseQuestionPaperFromImages(pdfBuffer);
-          if (parsedQuestions.length >= 4) {
+          if (parsedQuestions.length > 0) {
             usedVision = true;
             logger.info(`Vision parse SUCCESS: ${parsedQuestions.length} questions extracted`);
           } else {
-            logger.warn(`Vision parse yielded only ${parsedQuestions.length} questions, falling back to text`);
+            logger.warn(`Vision parse yielded 0 questions, falling back to text`);
           }
         } catch (visionError: any) {
           logger.warn('Vision parsing failed, falling back to text:', visionError.message);
         }
       }
 
-      // APPROACH 2: Text-based fallback (used when PDF bytes unavailable or vision returned < 4 questions)
-      if (parsedQuestions.length < 4) {
+      // APPROACH 2: Text-based parsing (used when PDF bytes unavailable or vision returned 0 questions, or to verify coverage)
+      if (parsedQuestions.length === 0) {
         logger.info('Falling back to text-based parsing...');
         parsedQuestions = await parseQuestionPaper(cleanedQuestionText, markSchemeText);
+      } else {
+        // Sanity check: if text extraction finds more questions than vision, prefer text
+        try {
+          const textQuestions = await parseQuestionPaper(cleanedQuestionText, markSchemeText);
+          if (textQuestions.length > parsedQuestions.length) {
+            logger.info(`Text extraction found more questions (${textQuestions.length}) than vision (${parsedQuestions.length}), preferring text extraction`);
+            parsedQuestions = textQuestions;
+          }
+        } catch (e: any) {
+          logger.warn('Text comparison check skipped:', e.message);
+        }
       }
 
       if (!parsedQuestions || parsedQuestions.length === 0) {
