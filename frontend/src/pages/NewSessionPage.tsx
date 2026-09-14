@@ -640,6 +640,9 @@ const NewSessionPage = () => {
           setManualQuestions(
             data.questions.map((q: any) => ({ ...q, marksAvailable: q.marksAvailable || 2 }))
           );
+          if (data.mismatchWarning || data.error) {
+            setParseError(data.mismatchWarning || data.error);
+          }
           setParseStatus('needs_manual');
         } else {
           // Complete parse failure — no questions extracted at all

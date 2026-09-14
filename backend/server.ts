@@ -1233,89 +1233,201 @@ Return ONLY a valid JSON array. No markdown, no explanation:
   }
 }
 
-// ─── Main orchestrator — 4-approach fallback chain ────────────────────────────
+// ─── PASS 3: Independent Top-Level Question Sanity Check ───────────────────────
+async function checkTopLevelQuestionSanity(
+  cleanedText: string,
+  extractedLeafQuestions: any[]
+): Promise<{
+  sanityPassed: boolean;
+  expectedTopLevelCount: number;
+  expectedQuestions: string[];
+  extractedTopLevelQuestions: string[];
+  warning: string | null;
+}> {
+  try {
+    const prompt = `You are an expert exam paper analyzer.
+Look at this exam paper text and list all main/top-level numbered questions (e.g. 1, 2, 3... or 01, 02, 03... or Q1, Q2...).
+Do NOT count sub-parts (like a, b, or i, ii).
+
+EXAM TEXT:
+${cleanedText}
+
+Return ONLY a valid JSON object:
+{
+  "topLevelCount": 6,
+  "topLevelQuestions": ["01", "02", "03", "04", "05", "06"]
+}`;
+
+    const response = await callGeminiSafe(prompt, {
+      context: 'question-sanity-check',
+      temperature: 0
+    });
+
+    const raw = (response.text || '').replace(/```json/gi, '').replace(/```/gi, '').trim();
+    const start = raw.indexOf('{');
+    const end = raw.lastIndexOf('}');
+    if (start === -1 || end === -1) {
+      return { sanityPassed: true, expectedTopLevelCount: 0, expectedQuestions: [], extractedTopLevelQuestions: [], warning: null };
+    }
+
+    const parsed = JSON.parse(raw.substring(start, end + 1));
+    const expectedQuestions: string[] = Array.isArray(parsed.topLevelQuestions)
+      ? parsed.topLevelQuestions.map((q: any) => String(q).trim())
+      : [];
+    const expectedTopLevelCount = Number(parsed.topLevelCount) || expectedQuestions.length;
+
+    // Normalize question number to bare digits for comparison (e.g. "Q01" -> "1", "01" -> "1", "03(a)" -> "3")
+    const toBareMainDigit = (str: string): string => {
+      const m = str.match(/^(?:Q(?:uestion)?\s*)?0?(\d+)/i);
+      return m ? String(parseInt(m[1], 10)) : str.toLowerCase();
+    };
+
+    const extractedTopLevelSet = new Set<string>();
+    const extractedTopLevelList: string[] = [];
+
+    for (const q of extractedLeafQuestions) {
+      const bareDigit = toBareMainDigit(q.questionNumber || '');
+      if (bareDigit && !extractedTopLevelSet.has(bareDigit)) {
+        extractedTopLevelSet.add(bareDigit);
+        extractedTopLevelList.push(q.questionNumber);
+      }
+    }
+
+    const missingExpected: string[] = [];
+    for (const exp of expectedQuestions) {
+      const expDigit = toBareMainDigit(exp);
+      if (!extractedTopLevelSet.has(expDigit)) {
+        missingExpected.push(exp);
+      }
+    }
+
+    if (missingExpected.length > 0 && expectedQuestions.length > 0) {
+      const warning = `This paper appears to have ${expectedTopLevelCount} main questions (${expectedQuestions.join(', ')}), but question(s) ${missingExpected.join(', ')} were not detected in the extracted structure. Please review before locking.`;
+      logger.warn(`[SanityCheck DISCREPANCY] ${warning}`);
+      return {
+        sanityPassed: false,
+        expectedTopLevelCount,
+        expectedQuestions,
+        extractedTopLevelQuestions: extractedTopLevelList,
+        warning
+      };
+    }
+
+    logger.info(`[SanityCheck PASSED] Extracted ${extractedTopLevelSet.size} top-level questions, matching expected ${expectedTopLevelCount}`);
+    return {
+      sanityPassed: true,
+      expectedTopLevelCount,
+      expectedQuestions,
+      extractedTopLevelQuestions: extractedTopLevelList,
+      warning: null
+    };
+
+  } catch (err: any) {
+    logger.warn('Sanity check non-fatal error:', err.message);
+    return {
+      sanityPassed: true,
+      expectedTopLevelCount: 0,
+      expectedQuestions: [],
+      extractedTopLevelQuestions: [],
+      warning: null
+    };
+  }
+}
+
+// ─── PASS 1: Extract Question Structure (Structure Only) ──────────────────────
+async function extractPaperStructure(cleanedText: string): Promise<any[]> {
+  logger.info('Pass 1 (Structure): Starting question structure extraction...');
+
+  // 1. LLM extraction with Gemini (Primary source of truth for arbitrary paper formats)
+  let geminiQuestions: any[] = [];
+  try {
+    geminiQuestions = await parseQuestionPaperWithGemini(cleanedText);
+    logger.info(`Pass 1 (Gemini): Extracted ${geminiQuestions.length} questions`);
+  } catch (e: any) {
+    logger.warn('Pass 1 (Gemini) failed:', e.message);
+  }
+
+  // 2. Direct regex extraction (fast path / complementary)
+  const regexQuestions = extractQuestionsFromTextDirectly(cleanedText);
+  logger.info(`Pass 1 (Direct Regex): Extracted ${regexQuestions.length} questions`);
+
+  // Choose the primary structural source:
+  let selected: any[] = [];
+  if (geminiQuestions.length >= regexQuestions.length && geminiQuestions.length > 0) {
+    selected = geminiQuestions;
+  } else if (regexQuestions.length > 0) {
+    selected = regexQuestions;
+  } else if (geminiQuestions.length > 0) {
+    selected = geminiQuestions;
+  } else {
+    logger.info('Pass 1: Calling buildFallbackQuestionsFromText as safety net...');
+    selected = buildFallbackQuestionsFromText(cleanedText);
+  }
+
+  return normalizeQuestionMarks(selected);
+}
+
+// ─── PASS 2: Extract Marks (Marks Allocation) ─────────────────────────────────
+function extractPaperMarks(
+  questions: any[],
+  questionPdfText: string,
+  markSchemeText?: string
+): any[] {
+  logger.info(`Pass 2 (Marks): Resolving marks for ${questions.length} questions...`);
+
+  let markedQuestions = questions.map(q => ({
+    ...q,
+    marksAvailable: Number(q.marksAvailable) || 0
+  }));
+
+  // For any question where marksAvailable is 0, check if mark can be parsed from questionPdfText
+  markedQuestions = markedQuestions.map(q => {
+    if (q.marksAvailable > 0) return q;
+
+    const qNumEscaped = String(q.questionNumber || '').replace(/[()]/g, '\\$&');
+    const markMatch = questionPdfText.match(new RegExp(`${qNumEscaped}[^\\n]*?\\((\\d{1,3})\\s*marks?\\)`, 'i'));
+    if (markMatch) {
+      const val = parseInt(markMatch[1], 10);
+      if (val > 0) {
+        logger.info(`Pass 2: Found ${val} marks for ${q.questionNumber} in question paper text`);
+        return { ...q, marksAvailable: val };
+      }
+    }
+    return q;
+  });
+
+  // If mark scheme text is provided, unconditionally cross-reference every question still missing marks
+  if (markSchemeText) {
+    const missingBefore = markedQuestions.filter(q => q.marksAvailable === 0).length;
+    if (missingBefore > 0) {
+      logger.info(`Pass 2: Cross-referencing mark scheme for ${missingBefore} questions with missing marks...`);
+      markedQuestions = crossReferenceMarksFromMarkScheme(markedQuestions, markSchemeText);
+      const missingAfter = markedQuestions.filter(q => q.marksAvailable === 0).length;
+      logger.info(`Pass 2: Mark scheme cross-reference resolved ${missingBefore - missingAfter} questions (${missingAfter} still unmarked)`);
+    }
+  }
+
+  return markedQuestions;
+}
+
+// ─── Main orchestrator — Two-Pass Pipeline ────────────────────────────────────
 async function parseQuestionPaper(
   questionPdfText: string,
   markSchemeText?: string
 ): Promise<any[]> {
   logger.info(`parseQuestionPaper: raw input length=${questionPdfText.length}`);
-  logger.info(`Raw preview (first 300 chars): "${questionPdfText.substring(0, 300)}"`);
 
-  // STEP 1: Remove cover page so the parser only sees actual question content
   const cleanedText = stripCoverPage(questionPdfText);
-  logger.info(`After stripping cover page: length=${cleanedText.length}`);
-  logger.info(`Clean text preview (first 300 chars): "${cleanedText.substring(0, 300)}"`);
+  logger.info(`Clean text length: ${cleanedText.length}`);
 
-  // Log first 40 lines to verify format
-  const lines = cleanedText.split('\n');
-  logger.info(`=== CLEANED TEXT LINES (first 40) ===`);
-  lines.slice(0, 40).forEach((l, i) => logger.info(`L${i}: "${l}"`));
-  logger.info(`=====================================`);
+  // PASS 1: Structure Extraction
+  const structureQuestions = await extractPaperStructure(cleanedText);
 
-  // STEP 2: Try direct regex extraction on the clean text
-  let questions = extractQuestionsFromTextDirectly(cleanedText);
-  questions = validateAndFixMarks(questions, markSchemeText);
+  // PASS 2: Marks Extraction
+  const markedQuestions = extractPaperMarks(structureQuestions, questionPdfText, markSchemeText);
 
-  // DIAGNOSTIC — print every question with its mark value
-  logger.info('=== PER-QUESTION MARK AUDIT ===');
-  let runningTotal = 0;
-  questions.forEach(q => {
-    runningTotal += (q.marksAvailable || 0);
-    const flag = q.marksAvailable === 0 ? '⚠️ ZERO MARKS' :
-      q.marksAvailable > 20 ? '⚠️ SUSPICIOUSLY HIGH' : '';
-    logger.info(`  ${q.questionNumber}: ${q.marksAvailable} marks ${flag} (running total: ${runningTotal})`);
-  });
-  logger.info(`Direct regex extracted: ${questions.length} questions, Total: ${runningTotal}`);
-  logger.info('================================');
-
-  // STEP 2b: Mark scheme cross-reference pass if any marks are 0
-  const extractedTotal = questions.reduce((s, q) => s + (q.marksAvailable || 0), 0);
-  const hasZeroMarks = questions.some(q => !q.marksAvailable || q.marksAvailable === 0);
-
-  if ((hasZeroMarks || extractedTotal === 0) && markSchemeText && questions.length > 0) {
-    logger.info('Running mark scheme cross-reference for direct questions with missing marks...');
-    questions = crossReferenceMarksFromMarkScheme(questions, markSchemeText);
-    const correctedTotal = questions.reduce((s, q) => s + (q.marksAvailable || 0), 0);
-    logger.info(`After cross-reference: total = ${correctedTotal}`);
-  }
-
-  const directTotal = questions.reduce((s, q) => s + (q.marksAvailable || 0), 0);
-  logger.info(`After cover page strip & audit: ${questions.length} questions, ${directTotal} marks`);
-
-  // If direct extraction found questions and all have marks > 0, we can accept it directly
-  if (questions.length > 0 && questions.every(q => (q.marksAvailable || 0) > 0)) {
-    logger.info(`Direct extraction complete with valid marks: ${questions.length} questions, ${directTotal} marks`);
-    return questions;
-  }
-
-  // STEP 3: Gemini fallback with cleaned text
-  logger.info('Direct extraction insufficient or missing marks, calling Gemini with cleaned text...');
-  let geminiQuestions: any[] = [];
-  try {
-    geminiQuestions = await parseQuestionPaperWithGemini(cleanedText);
-    if (geminiQuestions.length > 0 && markSchemeText) {
-      geminiQuestions = crossReferenceMarksFromMarkScheme(geminiQuestions, markSchemeText);
-    }
-    const geminiTotal = geminiQuestions.reduce((s, q) => s + (q.marksAvailable || 0), 0);
-    logger.info(`Gemini extracted ${geminiQuestions.length} questions, total ${geminiTotal} marks`);
-  } catch (e: any) {
-    logger.warn('Gemini extraction failed:', e.message);
-  }
-
-  // Prefer the largest non-empty extraction:
-  // If Gemini extracted at least as many questions as direct regex (or if direct regex is empty), use Gemini
-  if (geminiQuestions.length >= questions.length && geminiQuestions.length > 0) {
-    logger.info(`Preferring Gemini extraction: ${geminiQuestions.length} questions (vs ${questions.length} direct)`);
-    return normalizeQuestionMarks(geminiQuestions);
-  }
-
-  if (questions.length > 0) {
-    logger.info(`Using direct extraction questions: ${questions.length} questions`);
-    return normalizeQuestionMarks(questions);
-  }
-
-  logger.info('Both direct extraction and Gemini yielded 0 questions, falling back to buildFallbackQuestionsFromText...');
-  return buildFallbackQuestionsFromText(cleanedText);
+  logParseResult(markedQuestions, questionPdfText.length);
+  return markedQuestions;
 }
 
 // ─── Validation logger — prints every question with marks to backend terminal ─
@@ -2926,21 +3038,40 @@ Do not count the pages sequentially as Q1, Q2, Q3, Q4, Q5, Q6, Q7, Q8. Find the 
         });
       }
 
-      // Now extract mark scheme since we have questions
-      let parsedMarkScheme = await parseMarkScheme(markSchemeText, parsedQuestions);
-
+      // PASS 2: Resolve marks from paper and mark scheme
+      parsedQuestions = extractPaperMarks(parsedQuestions, questionPdfText, markSchemeText);
       const parsedQuestionsNormalized = normalizeQuestionMarks(parsedQuestions);
+
+      // PASS 3: Independent Top-Level Question Sanity Check
+      const sanityCheck = await checkTopLevelQuestionSanity(cleanedQuestionText, parsedQuestionsNormalized);
+
       const totalMaxMarks = parsedQuestionsNormalized.reduce(
         (sum: number, q: any) => sum + (Number(q.marksAvailable) || 0), 0
       );
+      const unmarkedQuestions = parsedQuestionsNormalized.filter(q => !q.marksAvailable || q.marksAvailable === 0);
 
-      if (totalMaxMarks === 0) {
+      // If sanity check failed or any question is missing marks, require lecturer verification
+      if (!sanityCheck.sanityPassed || unmarkedQuestions.length > 0 || totalMaxMarks === 0) {
+        let errorMsg = '';
+        if (!sanityCheck.sanityPassed && sanityCheck.warning) {
+          errorMsg = sanityCheck.warning;
+        } else if (unmarkedQuestions.length > 0) {
+          errorMsg = `Detected ${parsedQuestionsNormalized.length} questions, but ${unmarkedQuestions.length} question(s) are missing mark values. Please verify and enter the marks below.`;
+        } else {
+          errorMsg = `${parsedQuestionsNormalized.length} questions found but no mark values could be extracted. Please enter the marks below.`;
+        }
+
+        logger.info(`Session ${id}: needsManualMarks triggered (${unmarkedQuestions.length} unmarked, sanityPassed=${sanityCheck.sanityPassed})`);
         return res.status(400).json({
-          error: `${parsedQuestionsNormalized.length} questions found but no mark values could be extracted.`,
+          error: errorMsg,
           needsManualMarks: true,
-          questions: parsedQuestionsNormalized
+          questions: parsedQuestionsNormalized,
+          mismatchWarning: sanityCheck.warning || null
         });
       }
+
+      // Now extract mark scheme since all questions have verified marks
+      let parsedMarkScheme = await parseMarkScheme(markSchemeText, parsedQuestionsNormalized);
 
       // NEW — correctly handles both formats:
       // Format A: "Total: 100 marks" (single-question papers)
