@@ -16,7 +16,14 @@ import { apiFetch } from '../lib/api';
 const LecturerResultDetail = () => {
   const { id: sessionId, studentId } = useParams();
   const queryClient = useQueryClient();
-  const [overrides, setOverrides] = useState<Record<string, { mark: number; note: string }>>({});
+  interface OverrideEntry {
+    mark: number | string;
+    note: string;
+  }
+  const [overrides, setOverrides] = useState<Record<string, OverrideEntry>>({});
+  const [savedRows, setSavedRows] = useState<Record<string, boolean>>({});
+  const [savingRowId, setSavingRowId] = useState<string | null>(null);
+  const [isFinalizing, setIsFinalizing] = useState(false);
   const [comparisonResult, setComparisonResult] = useState<any>(null);
   const [showAuditTrail, setShowAuditTrail] = useState(false);
   const [auditTrail, setAuditTrail] = useState<any[]>([]);
@@ -31,19 +38,155 @@ const LecturerResultDetail = () => {
     })
   });
 
-  // Mutations
-  const overrideMutation = useMutation({
-    mutationFn: async ({ resultId, questionId, mark, note }: any) => {
-      const res = await apiFetch(`/api/results/${resultId}/override`, {
-        method: 'PATCH',
-        body: JSON.stringify({ questionId, lecturerMark: mark, lecturerNote: note })
-      });
-      return res.json();
-    },
-    onSuccess: () => {
-      queryClient.invalidateQueries({ queryKey: ['studentResult', sessionId, studentId] });
+  const handleMarkChange = (q: any, valStr: string) => {
+    if (valStr === '') {
+      setOverrides(prev => ({
+        ...prev,
+        [q.id]: {
+          mark: '',
+          note: prev[q.id]?.note ?? q.lecturerNote ?? ''
+        }
+      }));
+      return;
     }
-  });
+    const parsed = parseInt(valStr, 10);
+    if (isNaN(parsed)) return;
+    const clamped = Math.max(0, Math.min(q.marksAvailable, parsed));
+    setOverrides(prev => ({
+      ...prev,
+      [q.id]: {
+        mark: clamped,
+        note: prev[q.id]?.note ?? q.lecturerNote ?? ''
+      }
+    }));
+  };
+
+  const handleNoteChange = (q: any, noteVal: string) => {
+    setOverrides(prev => ({
+      ...prev,
+      [q.id]: {
+        mark: prev[q.id]?.mark !== undefined ? prev[q.id].mark : (q.lecturerOverride ?? q.marksAwarded),
+        note: noteVal
+      }
+    }));
+  };
+
+  const saveOverride = async (q: any) => {
+    const current = overrides[q.id];
+    if (!current || !result) return;
+
+    let finalMark: number;
+    if (current.mark === '') {
+      finalMark = q.lecturerOverride ?? q.marksAwarded ?? 0;
+    } else {
+      const parsed = typeof current.mark === 'number' ? current.mark : parseInt(String(current.mark), 10);
+      finalMark = isNaN(parsed) ? (q.lecturerOverride ?? q.marksAwarded ?? 0) : parsed;
+    }
+    finalMark = Math.max(0, Math.min(q.marksAvailable, finalMark));
+
+    const noteVal = current.note || '';
+    const existingMark = q.lecturerOverride ?? q.marksAwarded;
+    const existingNote = q.lecturerNote || '';
+
+    // If no changes from existing server values, simply clear local pending state
+    if (finalMark === existingMark && noteVal === existingNote && q.lecturerOverride !== null && q.lecturerOverride !== undefined) {
+      setOverrides(prev => {
+        const next = { ...prev };
+        delete next[q.id];
+        return next;
+      });
+      return;
+    }
+
+    setSavingRowId(q.id);
+    try {
+      const res = await apiFetch(`/api/results/${result.id}/override`, {
+        method: 'PATCH',
+        body: JSON.stringify({
+          questionId: q.id,
+          lecturerMark: finalMark,
+          lecturerNote: noteVal
+        })
+      });
+
+      if (!res.ok) {
+        const errData = await res.json().catch(() => ({}));
+        throw new Error(errData.error || 'Failed to save override');
+      }
+
+      // Success: clear pending override for this question
+      setOverrides(prev => {
+        const next = { ...prev };
+        delete next[q.id];
+        return next;
+      });
+
+      // Show temporary saved badge
+      setSavedRows(prev => ({ ...prev, [q.id]: true }));
+      setTimeout(() => {
+        setSavedRows(prev => {
+          const next = { ...prev };
+          delete next[q.id];
+          return next;
+        });
+      }, 2500);
+
+      await queryClient.invalidateQueries({ queryKey: ['studentResult', sessionId, studentId] });
+
+      if (showAuditTrail) {
+        loadAuditTrail();
+      }
+    } catch (err: any) {
+      console.error('Save override error:', err);
+      alert(err.message || 'Failed to save override mark');
+    } finally {
+      setSavingRowId(null);
+    }
+  };
+
+  const handleFinalizePaper = async () => {
+    if (!result?.id) return;
+    setIsFinalizing(true);
+    try {
+      const pendingList = Object.entries(overrides).map(([questionId, data]) => {
+        const q = result.questions?.find((item: any) => item.id === questionId);
+        const marksAvail = q?.marksAvailable ?? 100;
+        let finalMark: number;
+        if (data.mark === '') {
+          finalMark = q?.lecturerOverride ?? q?.marksAwarded ?? 0;
+        } else {
+          const parsed = typeof data.mark === 'number' ? data.mark : parseInt(String(data.mark), 10);
+          finalMark = isNaN(parsed) ? (q?.lecturerOverride ?? q?.marksAwarded ?? 0) : parsed;
+        }
+        return {
+          questionId,
+          lecturerMark: Math.max(0, Math.min(marksAvail, finalMark)),
+          lecturerNote: data.note || ''
+        };
+      });
+
+      const res = await apiFetch(`/api/results/${result.id}/finalize`, {
+        method: 'PATCH',
+        body: JSON.stringify({ overrides: pendingList })
+      });
+
+      if (!res.ok) {
+        const errData = await res.json().catch(() => ({}));
+        throw new Error(errData.error || 'Failed to finalize paper');
+      }
+
+      setOverrides({});
+      await queryClient.invalidateQueries({ queryKey: ['studentResult', sessionId, studentId] });
+      if (showAuditTrail) {
+        loadAuditTrail();
+      }
+    } catch (err: any) {
+      console.error('Finalize error:', err);
+      alert(err.message || 'Failed to finalize paper');
+    } finally {
+      setIsFinalizing(false);
+    }
+  };
 
   const reEvaluateMutation = useMutation({
     mutationFn: async () => {
@@ -88,11 +231,19 @@ const LecturerResultDetail = () => {
   // Live Recalculation (Local view)
   const computedScore = useMemo(() => {
     if (!result) return null;
-    const total = result.questions.reduce((acc: number, q: any) => {
+    const total = (result.questions || []).reduce((acc: number, q: any) => {
       const over = overrides[q.id];
-      return acc + (over ? over.mark : (q.lecturerOverride ?? q.marksAwarded));
+      let markVal: number;
+      if (over !== undefined && over.mark !== '') {
+        const parsed = typeof over.mark === 'number' ? over.mark : parseInt(String(over.mark), 10);
+        markVal = isNaN(parsed) ? (q.lecturerOverride ?? q.marksAwarded ?? 0) : parsed;
+      } else {
+        markVal = q.lecturerOverride ?? q.marksAwarded ?? 0;
+      }
+      return acc + markVal;
     }, 0);
-    const percentage = (total / result.maxMarks) * 100;
+    const max = result.maxMarks || 100;
+    const percentage = max > 0 ? (total / max) * 100 : 0;
     let grade = 'F';
     if (percentage >= 90) grade = 'A*';
     else if (percentage >= 80) grade = 'A';
@@ -220,16 +371,25 @@ const LecturerResultDetail = () => {
                <span>Download Report (PDF)</span>
              </button>
              <button 
+               onClick={handleFinalizePaper}
+               disabled={isFinalizing}
                className={cn(
-                 "group inline-flex items-center gap-2 px-5 py-2.5 rounded-xl text-xs font-semibold whitespace-nowrap transition-all duration-150 shadow-xs",
-                 Object.keys(overrides).length > 0
-                   ? "bg-navy hover:bg-navy-mid text-white shadow-xs hover:shadow-md hover:shadow-navy/20 hover:-translate-y-0.5 active:scale-[0.98] cursor-pointer"
-                   : "bg-slate-100 text-slate-400 border border-slate-200/80 cursor-not-allowed opacity-70"
+                 "group inline-flex items-center gap-2 px-5 py-2.5 rounded-xl text-xs font-semibold whitespace-nowrap transition-all duration-150 shadow-xs cursor-pointer",
+                 result?.reviewed && Object.keys(overrides).length === 0
+                   ? "bg-emerald-50 text-emerald-700 border border-emerald-300 hover:bg-emerald-100"
+                   : "bg-navy hover:bg-navy-mid text-white shadow-xs hover:shadow-md hover:shadow-navy/20 hover:-translate-y-0.5 active:scale-[0.98]"
                )}
-               disabled={Object.keys(overrides).length === 0}
              >
-               <CheckCircle2 size={14} className={cn("shrink-0", Object.keys(overrides).length > 0 ? "text-accent" : "text-slate-400")} />
-               <span>Finalize Paper</span>
+               {isFinalizing ? (
+                 <Loader2 size={14} className="animate-spin text-accent shrink-0" />
+               ) : result?.reviewed && Object.keys(overrides).length === 0 ? (
+                 <CheckCircle2 size={14} className="text-emerald-600 shrink-0" />
+               ) : (
+                 <CheckCircle2 size={14} className="text-accent shrink-0" />
+               )}
+               <span>
+                 {isFinalizing ? 'Finalizing...' : result?.reviewed && Object.keys(overrides).length === 0 ? 'Paper Finalized' : 'Finalize Paper'}
+               </span>
              </button>
           </div>
         </div>
@@ -419,47 +579,52 @@ const LecturerResultDetail = () => {
                         </td>
                         <td className="px-8 py-5">
                            <div className="flex gap-2">
-                              <div className="relative w-20">
+                              <div className="relative w-24">
                                  <input 
                                     type="number" 
-                                    className="input py-1.5 pr-2 pl-3 text-sm font-bold"
+                                    className="input py-1.5 pr-7 pl-3 text-sm font-bold w-full"
                                     max={q.marksAvailable}
                                     min={0}
-                                    placeholder={q.marksAwarded}
-                                    value={overrides[q.id]?.mark ?? q.lecturerOverride ?? ''}
-                                    onChange={e => setOverrides({
-                                       ...overrides,
-                                       [q.id]: { mark: parseInt(e.target.value), note: overrides[q.id]?.note || q.lecturerNote || '' }
-                                    })}
+                                    placeholder={String(q.marksAwarded)}
+                                    value={overrides[q.id]?.mark !== undefined ? overrides[q.id].mark : (q.lecturerOverride ?? '')}
+                                    onChange={e => handleMarkChange(q, e.target.value)}
+                                    onBlur={() => { if (overrides[q.id] !== undefined) saveOverride(q); }}
+                                    onKeyDown={e => { if (e.key === 'Enter') saveOverride(q); }}
                                  />
-                                 <span className="absolute right-2 top-1/2 -translate-y-1/2 text-[10px] text-text-muted">/{q.marksAvailable}</span>
+                                 <span className="absolute right-2 top-1/2 -translate-y-1/2 text-[10px] text-text-muted pointer-events-none select-none">
+                                   /{q.marksAvailable}
+                                 </span>
                               </div>
                               <input 
                                  type="text" 
-                                 className="input py-1.5 flex-1 text-[10px]"
+                                 className="input py-1.5 flex-1 text-xs"
                                  placeholder="Add lecturer note..."
-                                 value={overrides[q.id]?.note ?? q.lecturerNote ?? ''}
-                                 onChange={e => setOverrides({
-                                    ...overrides,
-                                    [q.id]: { mark: overrides[q.id]?.mark ?? q.lecturerOverride ?? q.marksAwarded, note: e.target.value }
-                                 })}
+                                 value={overrides[q.id]?.note !== undefined ? overrides[q.id].note : (q.lecturerNote ?? '')}
+                                 onChange={e => handleNoteChange(q, e.target.value)}
+                                 onBlur={() => { if (overrides[q.id] !== undefined) saveOverride(q); }}
+                                 onKeyDown={e => { if (e.key === 'Enter') saveOverride(q); }}
                               />
                            </div>
                         </td>
-                        <td className="px-8 py-5 text-right">
-                           {overrides[q.id] && (
+                        <td className="px-8 py-5 text-right w-24">
+                           {savingRowId === q.id ? (
+                              <span className="inline-flex items-center justify-center p-2 text-accent">
+                                 <Loader2 size={16} className="animate-spin" />
+                              </span>
+                           ) : savedRows[q.id] ? (
+                              <span className="inline-flex items-center gap-1 px-2.5 py-1 bg-emerald-50 text-emerald-700 border border-emerald-200 rounded-lg text-xs font-semibold">
+                                 <CheckCircle size={13} className="text-emerald-600" />
+                                 <span>Saved</span>
+                              </span>
+                           ) : overrides[q.id] !== undefined ? (
                               <button 
-                                 onClick={() => overrideMutation.mutate({
-                                    resultId: result.id,
-                                    questionId: q.id,
-                                    mark: overrides[q.id].mark,
-                                    note: overrides[q.id].note
-                                 })}
-                                 className="p-2 bg-accent text-white rounded-lg hover:bg-accent/90 transition-all shadow-md shadow-accent/20"
+                                 onClick={() => saveOverride(q)}
+                                 title="Save override (or press Enter)"
+                                 className="p-2 bg-accent text-white rounded-lg hover:bg-accent/90 transition-all shadow-md shadow-accent/20 cursor-pointer"
                               >
-                                 {overrideMutation.isPending ? <Loader2 size={16} className="animate-spin" /> : <Save size={16} />}
+                                 <Save size={16} />
                               </button>
-                           )}
+                           ) : null}
                         </td>
                      </tr>
                   ))}

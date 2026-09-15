@@ -4753,6 +4753,7 @@ Log in to MarkAI to review results.`.trim()
           studentId: { in: candidateIds } 
         },
         include: {
+          session: true,
           questions: { orderBy: { questionNumber: 'asc' } }
         }
       });
@@ -4805,11 +4806,13 @@ Log in to MarkAI to review results.`.trim()
 
       if (!question) return res.status(404).json({ error: 'Question not found' });
 
+      // Clamp override mark between 0 and question.marksAvailable
+      const clampedMark = Math.max(0, Math.min(question.marksAvailable, Math.round(Number(lecturerMark))));
       const previousMark = question.lecturerOverride ?? question.marksAwarded;
 
       await (prisma as any).questionResult.update({
         where: { id: questionId },
-        data: { lecturerOverride: lecturerMark, lecturerNote: lecturerNote || null }
+        data: { lecturerOverride: clampedMark, lecturerNote: lecturerNote || null }
       });
 
       await recordMarkChange({
@@ -4821,15 +4824,18 @@ Log in to MarkAI to review results.`.trim()
         changedByName: user?.fullName || 'Lecturer',
         changedByRole: 'LECTURER',
         previousMark,
-        newMark: lecturerMark,
+        newMark: clampedMark,
         marksAvailable: question.marksAvailable,
         reason: lecturerNote,
         changeType: 'LECTURER_OVERRIDE'
       });
 
-      const studentResult = await (prisma as any).studentResult.findUnique({ where: { id: req.params.resultId }, include: { questions: true } });
+      const studentResult = await (prisma as any).studentResult.findUnique({
+        where: { id: req.params.resultId },
+        include: { questions: { orderBy: { questionNumber: 'asc' } } }
+      });
       const totalMarks = studentResult!.questions.reduce((acc: number, q: any) => acc + (q.lecturerOverride ?? q.marksAwarded), 0);
-      const percentage = (totalMarks / studentResult!.maxMarks) * 100;
+      const percentage = studentResult!.maxMarks > 0 ? (totalMarks / studentResult!.maxMarks) * 100 : 0;
       let grade = 'F';
       if (percentage >= 90) grade = 'A*';
       else if (percentage >= 80) grade = 'A';
@@ -4838,7 +4844,11 @@ Log in to MarkAI to review results.`.trim()
       else if (percentage >= 50) grade = 'D';
       else if (percentage >= 40) grade = 'E';
 
-      const updated = await (prisma as any).studentResult.update({ where: { id: req.params.resultId }, data: { totalMarks, percentage, grade }, include: { questions: true } });
+      const updated = await (prisma as any).studentResult.update({
+        where: { id: req.params.resultId },
+        data: { totalMarks, percentage, grade },
+        include: { session: true, questions: { orderBy: { questionNumber: 'asc' } } }
+      });
       res.json(updated);
     } catch (error: any) {
       logger.error('Override error:', error);
@@ -4865,11 +4875,12 @@ Log in to MarkAI to review results.`.trim()
       if (!question) return res.status(404).json({ error: 'Question not found' });
 
       const previousMark = question.lecturerOverride ?? question.marksAwarded;
+      const clampedMark = Math.max(0, Math.min(question.marksAvailable, Math.round(Number(newMark))));
 
       const updatedQ = await (prisma as any).questionResult.update({
         where: { id: questionId },
         data: {
-          lecturerOverride: Number(newMark),
+          lecturerOverride: clampedMark,
           lecturerNote: note || null
         }
       });
@@ -4883,7 +4894,7 @@ Log in to MarkAI to review results.`.trim()
         changedByName: user?.fullName || 'Lecturer',
         changedByRole: 'LECTURER',
         previousMark,
-        newMark: Number(newMark),
+        newMark: clampedMark,
         marksAvailable: question.marksAvailable,
         reason: note,
         changeType: 'LECTURER_OVERRIDE'
@@ -4892,7 +4903,7 @@ Log in to MarkAI to review results.`.trim()
       const studentResult = await (prisma as any).studentResult.findUnique({ where: { id: resultId }, include: { questions: true } });
       if (studentResult) {
         const totalMarks = studentResult.questions.reduce((acc: number, q: any) => acc + (q.lecturerOverride ?? q.marksAwarded), 0);
-        const percentage = (totalMarks / studentResult.maxMarks) * 100;
+        const percentage = studentResult.maxMarks > 0 ? (totalMarks / studentResult.maxMarks) * 100 : 0;
         let grade = 'F';
         if (percentage >= 90) grade = 'A*';
         else if (percentage >= 80) grade = 'A';
@@ -4907,6 +4918,88 @@ Log in to MarkAI to review results.`.trim()
       res.json(updatedQ);
     } catch (error: any) {
       logger.error('Override error:', error);
+      res.status(500).json({ error: error.message });
+    }
+  });
+
+  app.patch('/api/results/:resultId/finalize', authMiddleware, async (req, res) => {
+    try {
+      const { resultId } = req.params;
+      const { overrides: pendingOverrides } = req.body || {};
+      const userId = (req as any).userId;
+
+      const user = await (prisma as any).user.findUnique({
+        where: { id: userId },
+        select: { fullName: true, userType: true }
+      });
+
+      // Apply any pending overrides if provided
+      if (Array.isArray(pendingOverrides)) {
+        for (const item of pendingOverrides) {
+          const { questionId, lecturerMark, lecturerNote } = item;
+          const question = await (prisma as any).questionResult.findUnique({
+            where: { id: questionId },
+            include: { studentResult: { include: { session: true } } }
+          });
+          if (question) {
+            const clampedMark = Math.max(0, Math.min(question.marksAvailable, Math.round(Number(lecturerMark))));
+            const previousMark = question.lecturerOverride ?? question.marksAwarded;
+
+            await (prisma as any).questionResult.update({
+              where: { id: questionId },
+              data: { lecturerOverride: clampedMark, lecturerNote: lecturerNote || null }
+            });
+
+            await recordMarkChange({
+              questionResultId: questionId,
+              sessionId: question.studentResult.sessionId,
+              studentId: question.studentResult.studentId,
+              questionNumber: question.questionNumber,
+              changedByUserId: userId,
+              changedByName: user?.fullName || 'Lecturer',
+              changedByRole: 'LECTURER',
+              previousMark,
+              newMark: clampedMark,
+              marksAvailable: question.marksAvailable,
+              reason: lecturerNote,
+              changeType: 'LECTURER_OVERRIDE'
+            });
+          }
+        }
+      }
+
+      // Recalculate score and mark as reviewed
+      const studentResult = await (prisma as any).studentResult.findUnique({
+        where: { id: resultId },
+        include: { questions: { orderBy: { questionNumber: 'asc' } } }
+      });
+
+      if (!studentResult) return res.status(404).json({ error: 'Result not found' });
+
+      const totalMarks = studentResult.questions.reduce((acc: number, q: any) => acc + (q.lecturerOverride ?? q.marksAwarded), 0);
+      const percentage = studentResult.maxMarks > 0 ? (totalMarks / studentResult.maxMarks) * 100 : 0;
+      let grade = 'F';
+      if (percentage >= 90) grade = 'A*';
+      else if (percentage >= 80) grade = 'A';
+      else if (percentage >= 70) grade = 'B';
+      else if (percentage >= 60) grade = 'C';
+      else if (percentage >= 50) grade = 'D';
+      else if (percentage >= 40) grade = 'E';
+
+      const updated = await (prisma as any).studentResult.update({
+        where: { id: resultId },
+        data: {
+          totalMarks,
+          percentage,
+          grade,
+          reviewed: true
+        },
+        include: { session: true, questions: { orderBy: { questionNumber: 'asc' } } }
+      });
+
+      res.json(updated);
+    } catch (error: any) {
+      logger.error('Finalize error:', error);
       res.status(500).json({ error: error.message });
     }
   });

@@ -59,7 +59,7 @@ export const sessionSchema = z.object({
 
 export const overrideSchema = z.object({
   questionId: z.string(),
-  lecturerMark: z.number().min(0),
+  lecturerMark: z.coerce.number().min(0),
   lecturerNote: z.string().optional()
 });
 
