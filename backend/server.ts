@@ -4792,7 +4792,11 @@ Log in to MarkAI to review results.`.trim()
   app.patch('/api/results/:resultId/override', authMiddleware, async (req, res) => {
     try {
       const { questionId, lecturerMark, lecturerNote } = overrideSchema.parse(req.body);
-      const userId = (req as any).userId;
+      const userId = (req as any).user?.id || (req as any).user?.userId || (req as any).userId;
+
+      if (!userId) {
+        return res.status(401).json({ error: 'User not authenticated' });
+      }
 
       const user = await (prisma as any).user.findUnique({
         where: { id: userId },
@@ -4821,8 +4825,8 @@ Log in to MarkAI to review results.`.trim()
         studentId: question.studentResult.studentId,
         questionNumber: question.questionNumber,
         changedByUserId: userId,
-        changedByName: user?.fullName || 'Lecturer',
-        changedByRole: 'LECTURER',
+        changedByName: user?.fullName || (req as any).user?.fullName || 'Lecturer',
+        changedByRole: (user?.userType as any) || (req as any).user?.userType || 'LECTURER',
         previousMark,
         newMark: clampedMark,
         marksAvailable: question.marksAvailable,
@@ -4860,7 +4864,11 @@ Log in to MarkAI to review results.`.trim()
     try {
       const { resultId, questionId } = req.params;
       const { newMark, note } = req.body;
-      const userId = (req as any).userId;
+      const userId = (req as any).user?.id || (req as any).user?.userId || (req as any).userId;
+
+      if (!userId) {
+        return res.status(401).json({ error: 'User not authenticated' });
+      }
 
       const user = await (prisma as any).user.findUnique({
         where: { id: userId },
@@ -4891,8 +4899,8 @@ Log in to MarkAI to review results.`.trim()
         studentId: question.studentResult.studentId,
         questionNumber: question.questionNumber,
         changedByUserId: userId,
-        changedByName: user?.fullName || 'Lecturer',
-        changedByRole: 'LECTURER',
+        changedByName: user?.fullName || (req as any).user?.fullName || 'Lecturer',
+        changedByRole: (user?.userType as any) || (req as any).user?.userType || 'LECTURER',
         previousMark,
         newMark: clampedMark,
         marksAvailable: question.marksAvailable,
@@ -4926,7 +4934,11 @@ Log in to MarkAI to review results.`.trim()
     try {
       const { resultId } = req.params;
       const { overrides: pendingOverrides } = req.body || {};
-      const userId = (req as any).userId;
+      const userId = (req as any).user?.id || (req as any).user?.userId || (req as any).userId;
+
+      if (!userId) {
+        return res.status(401).json({ error: 'User not authenticated' });
+      }
 
       const user = await (prisma as any).user.findUnique({
         where: { id: userId },
@@ -4956,8 +4968,8 @@ Log in to MarkAI to review results.`.trim()
               studentId: question.studentResult.studentId,
               questionNumber: question.questionNumber,
               changedByUserId: userId,
-              changedByName: user?.fullName || 'Lecturer',
-              changedByRole: 'LECTURER',
+              changedByName: user?.fullName || (req as any).user?.fullName || 'Lecturer',
+              changedByRole: (user?.userType as any) || (req as any).user?.userType || 'LECTURER',
               previousMark,
               newMark: clampedMark,
               marksAvailable: question.marksAvailable,
